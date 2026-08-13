@@ -2,16 +2,27 @@ import csv
 import io
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas import (
+    AnalyzePendingRequest,
+    AnalyzePendingResponse,
+    AnalyzeTaskRequest,
+    AnalyzeTaskResponse,
     ReviewTaskDetailResponse,
     ReviewTaskResponse,
     SaveReviewRequest,
     SaveReviewResponse,
+)
+from app.services.analysis_service import (
+    AnalysisConfigurationError,
+    AnalysisProviderError,
+    OpenAIAnalysisProvider,
+    analyze_task,
+    pending_task_ids,
 )
 from app.services.review_service import (
     list_review_tasks,
@@ -21,6 +32,31 @@ from app.services.review_service import (
 
 router = APIRouter(prefix="/api/review-tasks", tags=["经理审核"])
 DbSession = Annotated[Session, Depends(get_db)]
+
+
+def _provider() -> OpenAIAnalysisProvider:
+    try:
+        return OpenAIAnalysisProvider()
+    except AnalysisConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _analyze(db: Session, task_id: int, *, force: bool):
+    try:
+        return analyze_task(db, task_id, _provider(), force=force)
+    except AnalysisProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/analyze-pending", response_model=AnalyzePendingResponse)
+def analyze_pending(payload: AnalyzePendingRequest, db: DbSession):
+    task_ids = pending_task_ids(db, payload.limit)
+    results = [_analyze(db, task_id, force=payload.force) for task_id in task_ids]
+    return AnalyzePendingResponse(
+        requested_count=len(task_ids),
+        completed_count=len(results),
+        results=[AnalyzeTaskResponse(**result.__dict__) for result in results],
+    )
 
 
 @router.get("", response_model=list[ReviewTaskResponse])
@@ -55,6 +91,12 @@ def export_review_tasks(db: DbSession):
         'attachment; filename="kejing-audit-review-results.csv"'
     )
     return response
+
+
+@router.post("/{task_id}/analyze", response_model=AnalyzeTaskResponse)
+def post_analyze_task(task_id: int, payload: AnalyzeTaskRequest, db: DbSession):
+    result = _analyze(db, task_id, force=payload.force)
+    return AnalyzeTaskResponse(**result.__dict__)
 
 
 @router.get("/{task_id}", response_model=ReviewTaskDetailResponse)

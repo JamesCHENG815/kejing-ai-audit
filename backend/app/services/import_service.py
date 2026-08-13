@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.database import BACKEND_DIR
+from app.field_rules import is_auditable_field, is_image_field
 from app.models import (
     AuditTask,
     ExcelFieldValue,
@@ -90,7 +91,12 @@ def parse_visit_excel(file: BinaryIO) -> list[dict[str, Any]]:
                 "fields": {
                     header: _cell_text(row.get(header))
                     for header in headers
-                    if header and row.get(header) is not None
+                    if header
+                    and not is_image_field(header)
+                    and (
+                        row.get(header) is not None
+                        or is_auditable_field(header)
+                    )
                 },
             }
         )

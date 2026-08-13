@@ -7,6 +7,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.field_rules import (
+    EvidenceValue,
+    determine_field_status,
+    is_auditable_field,
+    required_audit_field_names,
+)
 from app.models import (
     AIFieldResult,
     AuditTask,
@@ -39,20 +45,30 @@ def _text(value: str | None) -> str:
     return value if value not in (None, "") else "—"
 
 
-def _same_value(left: str | None, right: str | None) -> bool:
-    if left is None or right is None:
-        return False
-    return "".join(left.split()).casefold() == "".join(right.split()).casefold()
-
-
 def _field_status(
     excel: ExcelFieldValue | None, ai: AIFieldResult | None
 ) -> str:
     if ai and ai.status in FIELD_STATUSES:
         return ai.status
-    if not excel or not excel.field_value or not ai or not ai.field_value:
-        return "missing"
-    return "matched" if _same_value(excel.field_value, ai.field_value) else "conflict"
+    if not ai:
+        return "pending"
+    evidence = None
+    if ai.evidence_recording_id is not None:
+        evidence = EvidenceValue(
+            recording_id=ai.evidence_recording_id,
+            start_seconds=ai.evidence_start_seconds or 0,
+            end_seconds=ai.evidence_end_seconds or ai.evidence_start_seconds or 0,
+            text=ai.evidence_text or "",
+        )
+    return determine_field_status(
+        ai.field_name,
+        excel.field_value if excel else None,
+        ai.field_value,
+        ai.confidence,
+        evidence,
+        excel_unit=excel.unit if excel else None,
+        ai_unit=ai.unit,
+    )
 
 
 def _task_status(value: str) -> str:
@@ -82,11 +98,21 @@ def _load_tasks(db: Session) -> list[AuditTask]:
 
 
 def _field_rows(task: AuditTask) -> list[ReviewFieldResponse]:
-    excel_by_name = {item.field_name: item for item in task.excel_values}
-    ai_by_name = {item.field_name: item for item in task.ai_results}
+    excel_by_name = {
+        item.field_name: item
+        for item in task.excel_values
+        if is_auditable_field(item.field_name)
+    }
+    ai_by_name = {
+        item.field_name: item
+        for item in task.ai_results
+        if is_auditable_field(item.field_name)
+    }
     review_by_name = {item.field_name: item for item in task.human_reviews}
-    field_names = list(excel_by_name)
-    field_names.extend(name for name in ai_by_name if name not in excel_by_name)
+    field_names = required_audit_field_names(
+        task.created_at.year,
+        [*excel_by_name, *ai_by_name],
+    )
 
     rows: list[ReviewFieldResponse] = []
     for name in field_names:
@@ -166,8 +192,12 @@ def load_review_task(db: Session, task_id: int) -> AuditTask:
 def review_task_detail(db: Session, task_id: int) -> ReviewTaskDetailResponse:
     task = load_review_task(db, task_id)
     recordings = [link.recording for link in task.task_recordings]
-    evidence_recording_ids = {
-        item.evidence_recording_id
+    evidence_segments = {
+        (
+            item.evidence_recording_id,
+            item.evidence_start_seconds,
+            item.evidence_end_seconds,
+        )
         for item in task.ai_results
         if item.evidence_recording_id is not None
     }
@@ -177,7 +207,11 @@ def review_task_detail(db: Session, task_id: int) -> ReviewTaskDetailResponse:
             time=segment.start_seconds,
             speaker=segment.speaker or "未知说话人",
             text=segment.text,
-            evidence=recording.id in evidence_recording_ids,
+            evidence=(
+                recording.id,
+                segment.start_seconds,
+                segment.end_seconds,
+            ) in evidence_segments,
         )
         for recording in recordings
         for segment in sorted(recording.transcript_segments, key=lambda item: item.start_seconds)

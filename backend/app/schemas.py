@@ -140,3 +140,30 @@ class SaveReviewResponse(BaseModel):
     status: str
     confirmed_count: int = Field(serialization_alias="confirmedCount")
     field_count: int = Field(serialization_alias="fieldCount")
+
+
+class AnalyzeTaskRequest(BaseModel):
+    force: bool = False
+
+
+class AnalyzeTaskResponse(BaseModel):
+    task_id: int
+    status: str
+    recording_count: int
+    transcript_segment_count: int
+    ai_result_count: int
+    matched: int
+    pending: int
+    conflict: int
+    missing: int
+
+
+class AnalyzePendingRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=100)
+    force: bool = False
+
+
+class AnalyzePendingResponse(BaseModel):
+    requested_count: int
+    completed_count: int
+    results: list[AnalyzeTaskResponse]
