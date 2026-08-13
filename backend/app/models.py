@@ -172,5 +172,6 @@ class HumanReview(TimestampMixin, Base):
     unit: Mapped[str | None] = mapped_column(String(30))
     change_reason: Mapped[str | None] = mapped_column(Text)
     reviewer: Mapped[str | None] = mapped_column(String(100))
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     task: Mapped["AuditTask"] = relationship(back_populates="human_reviews")

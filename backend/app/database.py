@@ -35,6 +35,18 @@ def init_db() -> None:
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    # create_all does not add columns to an existing SQLite database. Keep this
+    # small migration here until the project introduces a dedicated migration tool.
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(human_reviews)")
+        }
+        if "confirmed" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE human_reviews "
+                "ADD COLUMN confirmed BOOLEAN NOT NULL DEFAULT 0"
+            )
 
 
 def get_db() -> Generator[Session, None, None]:

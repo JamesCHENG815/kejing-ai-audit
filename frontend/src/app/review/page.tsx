@@ -3,12 +3,10 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import AppShell from "@/components/app-shell";
-import { apiRequest } from "@/lib/api";
-import { fieldStatusMeta, reviewTasks, ReviewTask, taskStatusMeta, TaskStatus } from "@/lib/review-data";
+import { API_BASE_URL, apiRequest } from "@/lib/api";
+import { fieldStatusMeta, ReviewTask, taskStatusMeta, TaskStatus } from "@/lib/review-data";
 
 type Filter = "all" | TaskStatus;
-
-function escapeCsv(value: string | number) { return `"${String(value).replaceAll('"', '""')}"`; }
 
 export default function ReviewPage() {
   const [tasks, setTasks] = useState<ReviewTask[]>([]);
@@ -16,14 +14,13 @@ export default function ReviewPage() {
   const [query, setQuery] = useState("");
   const [batchId, setBatchId] = useState("all");
   const [loading, setLoading] = useState(true);
-  const [source, setSource] = useState<"api" | "demo">("api");
   const [error, setError] = useState("");
 
   useEffect(() => {
     let active = true;
     apiRequest<ReviewTask[]>("/api/review-tasks")
-      .then((data) => { if (active) { setTasks(data); setSource("api"); } })
-      .catch(() => { if (active) { setTasks(reviewTasks); setSource("demo"); } })
+      .then((data) => { if (active) setTasks(data); })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "审核任务加载失败"); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
@@ -36,25 +33,8 @@ export default function ReviewPage() {
 
   const totals = useMemo(() => tasks.reduce((sum, task) => ({ matched: sum.matched + task.stats.matched, pending: sum.pending + task.stats.pending, conflict: sum.conflict + task.stats.conflict, missing: sum.missing + task.stats.missing }), { matched: 0, pending: 0, conflict: 0, missing: 0 }), [tasks]);
 
-  function exportResults() {
-    if (!filtered.length) return setError("当前筛选条件下没有可导出的任务");
-    const sampleFields = [
-      ["马爹利去年销售额", "25万元", "20万元", "20万元", "以录音证据为准", "冲突"],
-      ["今年截至三月销售额", "20万元", "20万元", "20万元", "", "一致"],
-      ["畅销产品", "马爹利名士 1L", "蓝带、名士", "蓝带、名士", "补充录音中提及产品", "待确认"],
-      ["其他经营问题", "", "客流减少，希望增加活动支持", "客流减少，希望增加活动支持", "Excel 未填，按录音补充", "缺失"],
-    ];
-    const rows = [
-      ["批次ID", "任务ID", "门店ID", "门店名称", "拜访人", "字段名称", "原始Excel值", "AI识别值", "最终人工值", "修改原因", "字段审核状态", "任务状态", "更新时间"],
-      ...filtered.flatMap((task) => sampleFields.map((field) => [task.batchId, task.id, task.customerId, task.store, task.visitor, ...field, taskStatusMeta[task.status].label, task.updatedAt])),
-    ];
-    const csv = `\uFEFF${rows.map((row) => row.map(escapeCsv).join(",")).join("\n")}`;
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    const link = document.createElement("a"); link.href = url; link.download = `客经智审-审核结果-${new Date().toISOString().slice(0, 10)}.csv`; link.click(); URL.revokeObjectURL(url);
-  }
-
   return <AppShell active="review"><main className="mx-auto max-w-[1400px] px-5 py-8 sm:px-8">
-    <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between"><div><p className="text-xs font-black tracking-[0.2em] text-[#137161]">REVIEW COMMAND CENTER</p><h1 className="mt-2 text-3xl font-black tracking-tight sm:text-4xl">经理审核工作台</h1><p className="mt-2 text-slate-500">按批次发现风险、处理冲突，并沉淀最终可信数据。</p></div><div className="flex items-center gap-3">{source === "demo" && <span className="rounded-full bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700 ring-1 ring-amber-200">演示数据 · 等待审核 API</span>}<button onClick={exportResults} className="rounded-xl bg-[#0d5b4f] px-5 py-3 text-sm font-black text-white hover:bg-[#137161]">↓ 导出审核结果</button></div></div>
+    <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between"><div><p className="text-xs font-black tracking-[0.2em] text-[#137161]">REVIEW COMMAND CENTER</p><h1 className="mt-2 text-3xl font-black tracking-tight sm:text-4xl">经理审核工作台</h1><p className="mt-2 text-slate-500">按批次发现风险、处理冲突，并沉淀最终可信数据。</p></div><a href={`${API_BASE_URL}/api/review-tasks/export`} className="rounded-xl bg-[#0d5b4f] px-5 py-3 text-center text-sm font-black text-white hover:bg-[#137161]">↓ 导出审核结果</a></div>
 
     {error && <div role="alert" className="mt-5 flex justify-between rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700"><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
 

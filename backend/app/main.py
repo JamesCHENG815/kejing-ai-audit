@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api.import_batches import router as import_batches_router
+from app.api.review_tasks import router as review_tasks_router
 from app.database import BACKEND_DIR, init_db
 
 
@@ -28,6 +29,7 @@ app.add_middleware(
 )
 
 app.include_router(import_batches_router)
+app.include_router(review_tasks_router)
 app.mount(
     "/storage",
     StaticFiles(directory=BACKEND_DIR / "storage"),
