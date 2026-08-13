@@ -71,6 +71,8 @@ class ReviewTaskResponse(BaseModel):
     status: str
     updated_at: str = Field(serialization_alias="updatedAt")
     stats: ReviewStats
+    address: str = "—"
+    visit_date: str = Field(default="—", serialization_alias="visitDate")
 
 
 class ReviewEvidence(BaseModel):
@@ -121,6 +123,8 @@ class ReviewTaskDetailResponse(BaseModel):
     recordings: list[ReviewRecordingResponse]
     transcripts: list[ReviewTranscriptResponse]
     history: list[ReviewHistoryResponse]
+    has_ai_analysis: bool = Field(serialization_alias="hasAiAnalysis")
+    has_transcript: bool = Field(serialization_alias="hasTranscript")
 
 
 class ReviewFieldInput(BaseModel):

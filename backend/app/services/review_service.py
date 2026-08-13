@@ -152,6 +152,11 @@ def _field_rows(task: AuditTask) -> list[ReviewFieldResponse]:
 
 def _task_response(task: AuditTask) -> ReviewTaskResponse:
     counts = Counter(field.status for field in _field_rows(task))
+    excel_values = {item.field_name: item.field_value for item in task.excel_values}
+    address = excel_values.get("地址") or excel_values.get("POI_ADDRESS") or "—"
+    visit_date = excel_values.get("拜访时间") or excel_values.get("拜访日期") or "—"
+    if visit_date != "—":
+        visit_date = visit_date.split("T", 1)[0]
     return ReviewTaskResponse(
         id=str(task.id),
         batch_id=task.import_batch_id,
@@ -161,6 +166,8 @@ def _task_response(task: AuditTask) -> ReviewTaskResponse:
         status=_task_status(task.status),
         updated_at=_datetime_text(task.updated_at),
         stats=ReviewStats(**{name: counts[name] for name in FIELD_STATUSES}),
+        address=address,
+        visit_date=visit_date,
     )
 
 
@@ -246,6 +253,8 @@ def review_task_detail(db: Session, task_id: int) -> ReviewTaskDetailResponse:
         ],
         transcripts=transcripts,
         history=history,
+        has_ai_analysis=bool(task.ai_results),
+        has_transcript=bool(transcripts),
     )
 
 
