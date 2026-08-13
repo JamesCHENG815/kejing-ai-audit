@@ -1,6 +1,6 @@
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ??
-  "http://localhost:8000";
+  "http://127.0.0.1:8000";
 
 export class ApiError extends Error {
   constructor(
@@ -50,7 +50,14 @@ export function uploadWithProgress<T>(
         onProgress(Math.round((event.loaded / event.total) * 100));
       }
     };
-    request.onerror = () => reject(new ApiError("无法连接后端服务"));
+    request.onerror = () =>
+      reject(
+        new ApiError(
+          `无法连接后端服务（${API_BASE_URL}），请确认 FastAPI 已启动`,
+        ),
+      );
+    request.ontimeout = () => reject(new ApiError("上传超时，请检查后端服务后重试"));
+    request.timeout = 120_000;
     request.onload = () => {
       if (request.status >= 200 && request.status < 300) {
         resolve(request.response as T);
