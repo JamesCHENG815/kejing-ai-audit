@@ -1,11 +1,69 @@
-import Link from "next/link";
+"use client";
 
-const tasks = [
-  { id: "TASK-20260813-001", store: "风筝酒业", visitor: "谭竞锋（佛山）", recordings: 2, conflicts: 1 },
-  { id: "TASK-20260813-002", store: "品惠行烟酒（天景大厦店）", visitor: "郑之源（广州）", recordings: 1, conflicts: 2 },
-  { id: "TASK-20260813-003", store: "宜嘉真烟酒行（恒福新里程分店）", visitor: "谭竞锋（佛山）", recordings: 2, conflicts: 1 },
-];
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import AppShell from "@/components/app-shell";
+import { apiRequest } from "@/lib/api";
+import { fieldStatusMeta, reviewTasks, ReviewTask, taskStatusMeta, TaskStatus } from "@/lib/review-data";
+
+type Filter = "all" | TaskStatus;
+
+function escapeCsv(value: string | number) { return `"${String(value).replaceAll('"', '""')}"`; }
 
 export default function ReviewPage() {
-  return <main className="min-h-screen bg-[#f4f7f9] px-5 py-10 text-slate-900 sm:px-8"><div className="mx-auto max-w-5xl"><p className="text-sm font-semibold tracking-[0.16em] text-teal-700">KEJING AI AUDIT</p><h1 className="mt-2 text-3xl font-bold">待审核任务</h1><p className="mt-2 text-slate-500">选择任务进入经理人工审核详情。</p><div className="mt-7 space-y-3">{tasks.map((task) => <Link key={task.id} href={`/review/${task.id}`} className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-400 hover:shadow-md sm:flex-row sm:items-center sm:justify-between"><div><h2 className="font-bold">{task.store}</h2><p className="mt-1 text-sm text-slate-500">{task.visitor} · {task.recordings} 段录音 · {task.id}</p></div><div className="flex items-center gap-3"><span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-bold text-rose-700">{task.conflicts} 项冲突</span><span className="font-semibold text-teal-700">开始审核 →</span></div></Link>)}</div></div></main>;
+  const [tasks, setTasks] = useState<ReviewTask[]>([]);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [query, setQuery] = useState("");
+  const [batchId, setBatchId] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [source, setSource] = useState<"api" | "demo">("api");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    apiRequest<ReviewTask[]>("/api/review-tasks")
+      .then((data) => { if (active) { setTasks(data); setSource("api"); } })
+      .catch(() => { if (active) { setTasks(reviewTasks); setSource("demo"); } })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const batches = useMemo(() => [...new Set(tasks.map((task) => task.batchId))], [tasks]);
+  const filtered = useMemo(() => tasks.filter((task) => {
+    const needle = query.trim().toLowerCase();
+    return (filter === "all" || task.status === filter) && (batchId === "all" || task.batchId === Number(batchId)) && (!needle || [task.store, task.customerId, task.visitor].some((value) => value.toLowerCase().includes(needle)));
+  }), [tasks, filter, batchId, query]);
+
+  const totals = useMemo(() => tasks.reduce((sum, task) => ({ matched: sum.matched + task.stats.matched, pending: sum.pending + task.stats.pending, conflict: sum.conflict + task.stats.conflict, missing: sum.missing + task.stats.missing }), { matched: 0, pending: 0, conflict: 0, missing: 0 }), [tasks]);
+
+  function exportResults() {
+    if (!filtered.length) return setError("当前筛选条件下没有可导出的任务");
+    const sampleFields = [
+      ["马爹利去年销售额", "25万元", "20万元", "20万元", "以录音证据为准", "冲突"],
+      ["今年截至三月销售额", "20万元", "20万元", "20万元", "", "一致"],
+      ["畅销产品", "马爹利名士 1L", "蓝带、名士", "蓝带、名士", "补充录音中提及产品", "待确认"],
+      ["其他经营问题", "", "客流减少，希望增加活动支持", "客流减少，希望增加活动支持", "Excel 未填，按录音补充", "缺失"],
+    ];
+    const rows = [
+      ["批次ID", "任务ID", "门店ID", "门店名称", "拜访人", "字段名称", "原始Excel值", "AI识别值", "最终人工值", "修改原因", "字段审核状态", "任务状态", "更新时间"],
+      ...filtered.flatMap((task) => sampleFields.map((field) => [task.batchId, task.id, task.customerId, task.store, task.visitor, ...field, taskStatusMeta[task.status].label, task.updatedAt])),
+    ];
+    const csv = `\uFEFF${rows.map((row) => row.map(escapeCsv).join(",")).join("\n")}`;
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a"); link.href = url; link.download = `客经智审-审核结果-${new Date().toISOString().slice(0, 10)}.csv`; link.click(); URL.revokeObjectURL(url);
+  }
+
+  return <AppShell active="review"><main className="mx-auto max-w-[1400px] px-5 py-8 sm:px-8">
+    <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between"><div><p className="text-xs font-black tracking-[0.2em] text-[#137161]">REVIEW COMMAND CENTER</p><h1 className="mt-2 text-3xl font-black tracking-tight sm:text-4xl">经理审核工作台</h1><p className="mt-2 text-slate-500">按批次发现风险、处理冲突，并沉淀最终可信数据。</p></div><div className="flex items-center gap-3">{source === "demo" && <span className="rounded-full bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700 ring-1 ring-amber-200">演示数据 · 等待审核 API</span>}<button onClick={exportResults} className="rounded-xl bg-[#0d5b4f] px-5 py-3 text-sm font-black text-white hover:bg-[#137161]">↓ 导出审核结果</button></div></div>
+
+    {error && <div role="alert" className="mt-5 flex justify-between rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700"><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
+
+    <section className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{(["matched", "pending", "conflict", "missing"] as const).map((key) => <div key={key} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-sm font-bold text-slate-500">{fieldStatusMeta[key].label}字段</span><span className={`h-2.5 w-2.5 rounded-full ${fieldStatusMeta[key].dot}`}/></div><p className="mt-3 text-3xl font-black tabular-nums">{totals[key]}</p><p className="mt-1 text-xs text-slate-400">当前全部批次</p></div>)}</section>
+
+    <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="grid gap-3 lg:grid-cols-[1fr_auto_auto]"><label className="relative"><span className="sr-only">搜索任务</span><span className="absolute left-3 top-2.5 text-slate-400">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索门店名称、门店 ID 或拜访人" className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-sm outline-none focus:border-[#137161]"/></label><select value={batchId} onChange={(event) => setBatchId(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold outline-none"><option value="all">全部批次</option>{batches.map((id) => <option key={id} value={id}>批次 #{id}</option>)}</select><div className="flex overflow-x-auto rounded-xl bg-slate-100 p-1">{(["all", "pending", "reviewing", "completed"] as Filter[]).map((item) => <button key={item} onClick={() => setFilter(item)} className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-bold ${filter === item ? "bg-white text-[#0d5b4f] shadow-sm" : "text-slate-500"}`}>{item === "all" ? "全部" : taskStatusMeta[item].label}</button>)}</div></div></section>
+
+    <div className="mt-5 flex items-center justify-between text-sm text-slate-500"><span>显示 <strong className="text-slate-900">{filtered.length}</strong> / {tasks.length} 条任务</span><span>更新时间倒序</span></div>
+
+    {loading ? <div className="mt-4 space-y-3" aria-label="加载中">{[1,2,3].map((item) => <div key={item} className="h-32 animate-pulse rounded-2xl bg-slate-200"/>)}</div> : filtered.length === 0 ? <section className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white py-16 text-center"><p className="text-3xl">⌕</p><h2 className="mt-3 font-black">没有找到匹配任务</h2><p className="mt-1 text-sm text-slate-500">尝试清除搜索词或切换审核状态。</p><button onClick={() => { setQuery(""); setFilter("all"); setBatchId("all"); }} className="mt-4 text-sm font-bold text-[#137161]">重置筛选</button></section> : <div className="mt-4 space-y-3">{filtered.map((task) => <Link href={`/review/${task.id}`} key={task.id} className="group block rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-[#70a89e] hover:shadow-md"><div className="grid gap-5 lg:grid-cols-[1.2fr_.8fr_auto] lg:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="truncate text-lg font-black">{task.store}</h2><span className={`rounded-full px-2.5 py-1 text-xs font-black ring-1 ${taskStatusMeta[task.status].className}`}>{taskStatusMeta[task.status].label}</span></div><p className="mt-2 text-sm text-slate-500">{task.visitor} · Customer ID {task.customerId}</p><p className="mt-1 text-xs text-slate-400">批次 #{task.batchId} · 任务 #{task.id} · 更新于 {task.updatedAt}</p></div><div className="grid grid-cols-4 gap-2">{(["matched", "pending", "conflict", "missing"] as const).map((key) => <div key={key} className={`rounded-xl px-2 py-3 text-center ${fieldStatusMeta[key].className}`}><p className="text-lg font-black tabular-nums">{task.stats[key]}</p><p className="text-[10px] font-bold">{fieldStatusMeta[key].label}</p></div>)}</div><span className="text-sm font-black text-[#137161] group-hover:translate-x-1">进入审核 →</span></div></Link>)}</div>}
+  </main></AppShell>;
 }

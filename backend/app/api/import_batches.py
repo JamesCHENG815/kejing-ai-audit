@@ -15,6 +15,7 @@ from app.schemas import (
 )
 from app.services.import_service import (
     create_import_batch,
+    delete_recording,
     load_batch_matches,
     submit_batch,
     update_matches,
@@ -91,6 +92,11 @@ def create_recordings(
         uploaded_count=uploaded_count,
         matched_count=matched_count,
     )
+
+
+@router.delete("/{batch_id}/recordings/{recording_id}", status_code=204)
+def remove_recording(batch_id: int, recording_id: int, db: DbSession):
+    delete_recording(db, batch_id, recording_id)
 
 
 @router.get("/{batch_id}/matches", response_model=BatchMatchesResponse)

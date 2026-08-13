@@ -67,12 +67,20 @@ def parse_visit_excel(file: BinaryIO) -> list[dict[str, Any]]:
     visits: list[dict[str, Any]] = []
     for values in rows:
         row = dict(zip(headers, values, strict=False))
+        # Excel 中常会有格式留下的空白行；跳过它而不是停止读取，避免漏掉后续门店。
         if not any(value is not None for value in values):
-            break
+            continue
         customer_id = _cell_text(row.get("POI_ID"))
         store_name = _cell_text(row.get("门店名称"))
         visitor = _cell_text(row.get("拜访人"))
-        if not customer_id or not store_name or not visitor:
+        if (
+            not customer_id
+            or not customer_id.strip()
+            or not store_name
+            or not store_name.strip()
+            or not visitor
+            or not visitor.strip()
+        ):
             continue
         visits.append(
             {
@@ -214,6 +222,25 @@ def upload_recordings(
         raise
 
 
+def delete_recording(db: Session, batch_id: int, recording_id: int) -> None:
+    batch = get_batch(db, batch_id)
+    if batch.status == "submitted":
+        raise HTTPException(status_code=409, detail="已提交批次不能删除录音")
+    recording = db.scalar(
+        select(Recording).where(
+            Recording.id == recording_id,
+            Recording.import_batch_id == batch_id,
+        )
+    )
+    if recording is None:
+        raise HTTPException(status_code=404, detail="录音不存在")
+    path = BACKEND_DIR / recording.file_path
+    db.delete(recording)
+    db.commit()
+    if path.exists():
+        path.unlink()
+
+
 def load_batch_matches(db: Session, batch_id: int) -> ImportBatch:
     statement = (
         select(ImportBatch)
@@ -235,7 +262,14 @@ def update_matches(db: Session, batch_id: int, assignments) -> None:
     batch = load_batch_matches(db, batch_id)
     task_ids = {task.id for task in batch.tasks}
     recording_ids = {recording.id for recording in batch.recordings}
+    assigned_recording_ids: set[int] = set()
     for assignment in assignments:
+        if assignment.recording_id in assigned_recording_ids:
+            raise HTTPException(
+                status_code=422,
+                detail=f"录音 {assignment.recording_id} 在一次提交中被重复关联",
+            )
+        assigned_recording_ids.add(assignment.recording_id)
         if assignment.task_id not in task_ids:
             raise HTTPException(
                 status_code=422,
@@ -257,6 +291,9 @@ def update_matches(db: Session, batch_id: int, assignments) -> None:
             link = links[0]
             link.task_id = assignment.task_id
             link.is_confirmed = assignment.confirmed
+            # 一段录音只能归属一个门店。清除遗留的重复关联，保持提交校验准确。
+            for duplicate_link in links[1:]:
+                db.delete(duplicate_link)
         else:
             db.add(
                 TaskRecording(
@@ -274,7 +311,8 @@ def submit_batch(db: Session, batch_id: int) -> tuple[int, int]:
     links = [link for task in batch.tasks for link in task.task_recordings]
     if not links:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="尚未上传录音")
-    if len(links) != len(batch.recordings):
+    linked_recording_ids = {link.recording_id for link in links}
+    if len(links) != len(batch.recordings) or len(linked_recording_ids) != len(batch.recordings):
         raise HTTPException(status_code=409, detail="仍有录音未关联门店")
     unconfirmed = [link.id for link in links if not link.is_confirmed]
     if unconfirmed:

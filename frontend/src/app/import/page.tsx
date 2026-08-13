@@ -1,243 +1,128 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+import AppShell from "@/components/app-shell";
+import { API_BASE_URL, apiRequest, uploadWithProgress } from "@/lib/api";
 
-const stores = [
-  {
-    customerId: "9804729391770344743",
-    name: "品惠行烟酒（天景大厦店）",
-    visitor: "郑之源（广州）",
-    recordings: ["品惠行烟酒(天景大厦店)(1).m4a"],
-  },
-  {
-    customerId: "10467369287105918722",
-    name: "风筝酒业",
-    visitor: "谭竞锋（佛山）",
-    recordings: ["风筝酒业.m4a", "风筝酒业(1).m4a"],
-  },
-  {
-    customerId: "10094564054480562271",
-    name: "宜嘉真烟酒行（恒福新里程分店）",
-    visitor: "谭竞锋（佛山）",
-    recordings: ["宜嘉真烟酒.m4a", "宜嘉珍烟酒行.m4a"],
-  },
-  {
-    customerId: "1503940623623717731",
-    name: "明智酒业（三水雅居乐花园雅怡居店）",
-    visitor: "谭竞锋（佛山）",
-    recordings: ["明智酒业(2).m4a", "明智酒业(3).m4a"],
-  },
-  {
-    customerId: "12623470005627425111",
-    name: "和裕商行（九鸿世纪广场店）",
-    visitor: "文观伙（深圳）",
-    recordings: ["录音信息--和裕商行洋酒市場调研_.m4a"],
-  },
-];
+type Batch = { id: number; original_filename: string; status: string; task_count: number };
+type Recording = { id: number; filename: string; recommended: boolean; confirmed: boolean };
+type Task = { id: number; customer_id: string; store_name: string; visitor: string; recordings: Recording[] };
+type Matches = { batch_id: number; status: string; tasks: Task[]; unassigned_recordings: Recording[] };
 
-const allRecordings = stores.flatMap((store) => store.recordings);
+const MAX_EXCEL = 50 * 1024 * 1024;
+const MAX_AUDIO = 100 * 1024 * 1024;
+const excelTypes = ["xlsx", "xlsm"];
+const audioTypes = ["m4a", "mp3", "wav", "aac", "flac"];
 
-function UploadIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-7 w-7 fill-none stroke-current stroke-2">
-      <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
-    </svg>
-  );
-}
+function ext(name: string) { return name.split(".").pop()?.toLowerCase() ?? ""; }
+function sizeLabel(bytes: number) { return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`; }
+function errorText(error: unknown) { return error instanceof Error ? error.message : "操作失败，请稍后重试"; }
 
 export default function ImportPage() {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [fileName, setFileName] = useState("");
-  const [isDragging, setIsDragging] = useState(false);
-  const [selected, setSelected] = useState<string[]>(allRecordings);
-  const [assignments, setAssignments] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      stores.flatMap((store) =>
-        store.recordings.map((recording) => [recording, store.customerId]),
-      ),
-    ),
-  );
-  const [confirmed, setConfirmed] = useState(false);
+  const excelRef = useRef<HTMLInputElement>(null);
+  const audioRef = useRef<HTMLInputElement>(null);
+  const [excel, setExcel] = useState<File | null>(null);
+  const [audios, setAudios] = useState<File[]>([]);
+  const [batch, setBatch] = useState<Batch | null>(null);
+  const [matches, setMatches] = useState<Matches | null>(null);
+  const [assignments, setAssignments] = useState<Record<number, number>>({});
+  const [dragging, setDragging] = useState<"excel" | "audio" | null>(null);
+  const [busy, setBusy] = useState<"excel" | "audio" | "save" | "submit" | null>(null);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
-  const selectedCountByStore = useMemo(
-    () =>
-      Object.fromEntries(
-        stores.map((store) => [
-          store.customerId,
-          selected.filter(
-            (recording) => assignments[recording] === store.customerId,
-          ).length,
-        ]),
-      ),
-    [assignments, selected],
-  );
+  const recordings = useMemo(() => matches ? [...matches.tasks.flatMap((task) => task.recordings), ...matches.unassigned_recordings] : [], [matches]);
 
-  function acceptFile(file?: File) {
+  function chooseExcel(file?: File) {
     if (!file) return;
-    setFileName(file.name);
-    setConfirmed(false);
+    if (!excelTypes.includes(ext(file.name))) return setError("Excel 仅支持 .xlsx 或 .xlsm 格式");
+    if (file.size > MAX_EXCEL) return setError("Excel 文件不能超过 50 MB");
+    setExcel(file); setBatch(null); setMatches(null); setError(""); setNotice("");
   }
 
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    acceptFile(event.target.files?.[0]);
+  function chooseAudios(files: FileList | File[]) {
+    const selected = Array.from(files);
+    const invalid = selected.find((file) => !audioTypes.includes(ext(file.name)) || file.size > MAX_AUDIO);
+    if (invalid) return setError(`${invalid.name} 格式不支持或超过 100 MB`);
+    setAudios((current) => [...current, ...selected.filter((file) => !current.some((item) => item.name === file.name))]);
+    setError("");
   }
 
-  function handleDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault();
-    setIsDragging(false);
-    acceptFile(event.dataTransfer.files?.[0]);
+  async function uploadExcel() {
+    if (!excel) return;
+    setBusy("excel"); setProgress(0); setError(""); setNotice("");
+    try {
+      const form = new FormData(); form.append("file", excel);
+      const created = await uploadWithProgress<Batch>("/api/import-batches", form, setProgress);
+      setBatch(created); setNotice(`成功解析 ${created.task_count} 家门店，请继续上传录音。`);
+    } catch (err) { setError(errorText(err)); } finally { setBusy(null); }
   }
 
-  function toggleRecording(recording: string) {
-    setSelected((current) =>
-      current.includes(recording)
-        ? current.filter((item) => item !== recording)
-        : [...current, recording],
-    );
-    setConfirmed(false);
+  async function loadMatches(batchId: number) {
+    const data = await apiRequest<Matches>(`/api/import-batches/${batchId}/matches`);
+    setMatches(data);
+    const next: Record<number, number> = {};
+    data.tasks.forEach((task) => task.recordings.forEach((recording) => { next[recording.id] = task.id; }));
+    setAssignments(next);
   }
 
-  const allSelected = selected.length === allRecordings.length;
+  async function uploadAudios() {
+    if (!batch || !audios.length) return;
+    setBusy("audio"); setProgress(0); setError("");
+    try {
+      const form = new FormData(); audios.forEach((file) => form.append("files", file));
+      const result = await uploadWithProgress<{ uploaded_count: number; matched_count: number }>(`/api/import-batches/${batch.id}/recordings`, form, setProgress);
+      await loadMatches(batch.id); setAudios([]); setNotice(`已上传 ${result.uploaded_count} 段录音，系统推荐匹配 ${result.matched_count} 段。`);
+    } catch (err) { setError(errorText(err)); } finally { setBusy(null); }
+  }
 
-  return (
-    <main className="min-h-screen bg-[#f4f7f9] text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-5 sm:px-8">
-          <div>
-            <p className="text-sm font-semibold tracking-[0.18em] text-teal-700">KEJING AI AUDIT</p>
-            <h1 className="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">导入拜访数据</h1>
-          </div>
-          <div className="hidden items-center gap-2 rounded-full bg-teal-50 px-4 py-2 text-sm font-medium text-teal-800 sm:flex">
-            <span className="h-2 w-2 rounded-full bg-teal-500" />
-            新建审核任务
-          </div>
-        </div>
-      </header>
+  async function removeRecording(id: number) {
+    if (!batch) return;
+    setError("");
+    try {
+      await fetch(`${API_BASE_URL}/api/import-batches/${batch.id}/recordings/${id}`, { method: "DELETE" }).then(async (response) => { if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail ?? "删除失败"); });
+      await loadMatches(batch.id); setNotice("录音已删除。");
+    } catch (err) { setError(errorText(err)); }
+  }
 
-      <div className="mx-auto max-w-7xl space-y-6 px-5 py-8 sm:px-8">
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
-          <div className="mb-5 flex items-start gap-3">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-teal-700 text-sm font-bold text-white">1</span>
-            <div>
-              <h2 className="text-lg font-bold">上传 SFA Excel</h2>
-              <p className="mt-1 text-sm text-slate-500">上传门店拜访明细，系统将自动解析客户信息。</p>
-            </div>
-          </div>
+  async function saveMatches(submit = false) {
+    if (!batch || !recordings.length) return;
+    const missing = recordings.filter((recording) => !assignments[recording.id]);
+    if (missing.length) return setError(`仍有 ${missing.length} 段录音未关联门店`);
+    setBusy(submit ? "submit" : "save"); setError("");
+    try {
+      await apiRequest(`/api/import-batches/${batch.id}/matches`, { method: "PUT", body: JSON.stringify({ assignments: recordings.map((recording) => ({ recording_id: recording.id, task_id: assignments[recording.id], confirmed: true })) }) });
+      if (submit) {
+        await apiRequest(`/api/import-batches/${batch.id}/submit`, { method: "POST" });
+        setBatch({ ...batch, status: "submitted" }); setNotice("批次已提交，AI 分析任务已创建。");
+      } else { await loadMatches(batch.id); setNotice("录音与门店关联已保存。"); }
+    } catch (err) { setError(errorText(err)); } finally { setBusy(null); }
+  }
 
-          <div
-            onDragEnter={(event) => { event.preventDefault(); setIsDragging(true); }}
-            onDragOver={(event) => event.preventDefault()}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-            onClick={() => inputRef.current?.click()}
-            className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-8 text-center transition ${
-              isDragging ? "border-teal-600 bg-teal-50" : "border-slate-300 bg-slate-50 hover:border-teal-500 hover:bg-teal-50/50"
-            }`}
-          >
-            <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFileChange} className="hidden" />
-            <span className="mb-3 rounded-full bg-white p-3 text-teal-700 shadow-sm"><UploadIcon /></span>
-            {fileName ? (
-              <>
-                <p className="font-semibold text-teal-800">{fileName}</p>
-                <p className="mt-1 text-sm text-slate-500">文件已就绪 · 点击可重新选择</p>
-              </>
-            ) : (
-              <>
-                <p className="font-semibold">拖拽 Excel 到这里，或点击选择文件</p>
-                <p className="mt-1 text-sm text-slate-500">支持 .xlsx、.xls、.csv</p>
-              </>
-            )}
-          </div>
-        </section>
+  return <AppShell active="import"><main className="mx-auto max-w-[1280px] px-5 py-8 sm:px-8">
+    <div className="mb-8 flex flex-col gap-3 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-black tracking-[0.2em] text-[#137161]">IMPORT WORKSPACE</p><h1 className="mt-2 text-3xl font-black tracking-tight sm:text-4xl">把拜访资料变成可审核任务</h1><p className="mt-2 max-w-2xl text-slate-500">依次上传 SFA Excel 与门店录音，核对系统推荐关系后提交分析。</p></div><div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">API · <span className="font-mono text-xs text-slate-800">{API_BASE_URL}</span></div></div>
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
-          <div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
-            <div className="flex items-start gap-3">
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-teal-700 text-sm font-bold text-white">2</span>
-              <div>
-                <h2 className="text-lg font-bold">确认门店与录音关联</h2>
-                <p className="mt-1 text-sm text-slate-500">已解析 5 家门店，推荐匹配 8 段录音。可手动调整归属。</p>
-              </div>
-            </div>
-            <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={() => { setSelected(allSelected ? [] : allRecordings); setConfirmed(false); }}
-                className="h-4 w-4 accent-teal-700"
-              />
-              全选 8 段录音
-            </label>
-          </div>
+    <div className="mb-7 grid grid-cols-3 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">{["上传 Excel", "关联录音", "提交分析"].map((label, index) => { const active = index === 0 ? !batch : index === 1 ? batch && batch.status !== "submitted" : batch?.status === "submitted"; return <div key={label} className={`border-r border-slate-100 px-3 py-4 text-center text-sm font-bold last:border-0 ${active ? "bg-[#eaf5f1] text-[#0d5b4f]" : "text-slate-400"}`}><span className={`mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full ${active ? "bg-[#0d5b4f] text-white" : "bg-slate-100"}`}>{index + 1}</span>{label}</div>; })}</div>
 
-          <div className="overflow-hidden rounded-xl border border-slate-200">
-            <div className="hidden grid-cols-[minmax(260px,1.25fr)_minmax(260px,1fr)_120px] bg-slate-50 px-5 py-3 text-xs font-bold uppercase tracking-wider text-slate-500 md:grid">
-              <span>门店信息</span><span>推荐录音 / 调整关联</span><span className="text-right">状态</span>
-            </div>
-            <div className="divide-y divide-slate-200">
-              {stores.map((store) => (
-                <div key={store.customerId} className="grid gap-5 px-5 py-5 md:grid-cols-[minmax(260px,1.25fr)_minmax(260px,1fr)_120px] md:items-center">
-                  <div>
-                    <h3 className="font-bold text-slate-900">{store.name}</h3>
-                    <p className="mt-1 text-sm text-slate-500">拜访人：{store.visitor}</p>
-                    <p className="mt-1 font-mono text-xs text-slate-400">Customer ID · {store.customerId}</p>
-                  </div>
-                  <div className="space-y-3">
-                    {store.recordings.map((recording) => (
-                      <div key={recording} className="flex items-start gap-3">
-                        <input
-                          aria-label={`选择 ${recording}`}
-                          type="checkbox"
-                          checked={selected.includes(recording)}
-                          onChange={() => toggleRecording(recording)}
-                          className="mt-2 h-4 w-4 shrink-0 accent-teal-700"
-                        />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium" title={recording}>🎙️ {recording}</p>
-                          <select
-                            aria-label={`调整 ${recording} 的关联门店`}
-                            value={assignments[recording]}
-                            onChange={(event) => { setAssignments((current) => ({ ...current, [recording]: event.target.value })); setConfirmed(false); }}
-                            className="mt-1.5 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600 outline-none focus:border-teal-600"
-                          >
-                            {stores.map((option) => <option key={option.customerId} value={option.customerId}>{option.name}</option>)}
-                          </select>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="md:text-right">
-                    <span className="inline-flex rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
-                      已关联 {selectedCountByStore[store.customerId] ?? 0} 段
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
+    {(error || notice) && <div role={error ? "alert" : "status"} className={`mb-5 flex items-start justify-between gap-4 rounded-xl border px-4 py-3 text-sm font-semibold ${error ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}><span>{error || notice}</span><button onClick={() => { setError(""); setNotice(""); }} aria-label="关闭提示">×</button></div>}
 
-        <section className="flex flex-col items-stretch justify-between gap-4 rounded-2xl bg-slate-900 px-6 py-5 text-white shadow-lg sm:flex-row sm:items-center">
-          <div>
-            <p className="font-bold">共 5 家门店 · 已选择 {selected.length} / 8 段录音</p>
-            <p className="mt-1 text-sm text-slate-400">确认后将创建分析任务，当前阶段使用模拟数据。</p>
-          </div>
-          <button
-            type="button"
-            disabled={selected.length === 0}
-            onClick={() => setConfirmed(true)}
-            className="rounded-lg bg-teal-500 px-6 py-3 font-bold text-white transition hover:bg-teal-400 disabled:cursor-not-allowed disabled:bg-slate-600"
-          >
-            {confirmed ? "✓ 已提交分析" : "确认关联并开始分析"}
-          </button>
-        </section>
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7"><div className="flex items-start justify-between gap-4"><div><span className="text-xs font-black text-[#137161]">STEP 01</span><h2 className="mt-1 text-xl font-black">上传 SFA Excel</h2><p className="mt-1 text-sm text-slate-500">支持 .xlsx / .xlsm，单个文件不超过 50 MB。</p></div>{batch && <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700">解析成功</span>}</div>
+      <div onDragOver={(event) => event.preventDefault()} onDragEnter={() => setDragging("excel")} onDragLeave={() => setDragging(null)} onDrop={(event: DragEvent<HTMLDivElement>) => { event.preventDefault(); setDragging(null); chooseExcel(event.dataTransfer.files[0]); }} onClick={() => excelRef.current?.click()} className={`mt-5 cursor-pointer rounded-2xl border-2 border-dashed p-7 text-center transition ${dragging === "excel" ? "border-[#137161] bg-[#eaf5f1]" : "border-slate-300 bg-slate-50 hover:border-[#137161]"}`}><input ref={excelRef} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event: ChangeEvent<HTMLInputElement>) => chooseExcel(event.target.files?.[0])}/><span className="text-3xl">⇧</span><p className="mt-2 font-bold">{excel?.name ?? "拖拽 Excel 到此处，或点击选择"}</p>{excel && <p className="mt-1 text-xs text-slate-500">{sizeLabel(excel.size)}</p>}</div>
+      {busy === "excel" && <div className="mt-4"><div className="mb-1 flex justify-between text-xs font-bold text-slate-500"><span>上传并解析中</span><span>{progress}%</span></div><div className="h-2 rounded-full bg-slate-100"><div className="h-full rounded-full bg-[#137161] transition-all" style={{ width: `${progress}%` }}/></div></div>}
+      <div className="mt-5 flex justify-end"><button disabled={!excel || busy !== null} onClick={uploadExcel} className="rounded-xl bg-[#0d5b4f] px-6 py-3 font-bold text-white hover:bg-[#137161] disabled:cursor-not-allowed disabled:bg-slate-300">{busy === "excel" ? "正在处理…" : batch ? "重新导入" : "上传并解析"}</button></div>
+      {batch && <dl className="mt-6 grid gap-3 border-t border-slate-100 pt-6 sm:grid-cols-4"><div className="rounded-xl bg-slate-50 p-4"><dt className="text-xs text-slate-500">批次 ID</dt><dd className="mt-1 text-xl font-black">#{batch.id}</dd></div><div className="rounded-xl bg-slate-50 p-4 sm:col-span-2"><dt className="text-xs text-slate-500">文件名</dt><dd className="mt-1 truncate font-bold">{batch.original_filename}</dd></div><div className="rounded-xl bg-slate-50 p-4"><dt className="text-xs text-slate-500">解析结果</dt><dd className="mt-1 font-bold">{batch.task_count} 家门店</dd></div></dl>}
+    </section>
 
-        {confirmed && (
-          <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm font-medium text-emerald-800">
-            关联已确认：5 家门店和 {selected.length} 段录音已进入模拟分析队列。
-          </div>
-        )}
-      </div>
-    </main>
-  );
+    <section className={`mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7 ${!batch ? "pointer-events-none opacity-50" : ""}`}><div><span className="text-xs font-black text-[#137161]">STEP 02</span><h2 className="mt-1 text-xl font-black">上传并关联录音</h2><p className="mt-1 text-sm text-slate-500">支持批量上传；系统按文件名推荐门店，你可以手动调整。</p></div>
+      <div onDragOver={(event) => event.preventDefault()} onDrop={(event: DragEvent<HTMLDivElement>) => { event.preventDefault(); chooseAudios(event.dataTransfer.files); }} onClick={() => audioRef.current?.click()} className="mt-5 cursor-pointer rounded-xl border border-dashed border-slate-300 bg-slate-50 px-5 py-5 text-center hover:border-[#137161]"><input ref={audioRef} type="file" multiple accept="audio/*,.m4a,.aac,.flac" className="hidden" onChange={(event) => event.target.files && chooseAudios(event.target.files)}/><p className="font-bold">＋ 选择或拖入多段录音</p><p className="mt-1 text-xs text-slate-500">每段最大 100 MB</p></div>
+      {audios.length > 0 && <div className="mt-4 rounded-xl border border-slate-200"><div className="flex items-center justify-between border-b border-slate-100 px-4 py-3"><span className="text-sm font-bold">待上传 {audios.length} 段</span><button onClick={() => setAudios([])} className="text-xs font-bold text-rose-600">清空</button></div>{audios.map((file) => <div key={file.name} className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-sm last:border-0"><span className="truncate">♪ {file.name}</span><span className="shrink-0 text-xs text-slate-400">{sizeLabel(file.size)}</span></div>)}</div>}
+      {busy === "audio" && <div className="mt-4"><div className="mb-1 flex justify-between text-xs font-bold text-slate-500"><span>录音上传中</span><span>{progress}%</span></div><div className="h-2 rounded-full bg-slate-100"><div className="h-full rounded-full bg-[#137161]" style={{ width: `${progress}%` }}/></div></div>}
+      <div className="mt-4 flex justify-end"><button disabled={!audios.length || busy !== null} onClick={uploadAudios} className="rounded-xl border border-[#0d5b4f] px-5 py-2.5 text-sm font-bold text-[#0d5b4f] disabled:border-slate-200 disabled:text-slate-300">上传录音</button></div>
+
+      {matches && <div className="mt-7 overflow-hidden rounded-xl border border-slate-200"><div className="grid grid-cols-[1fr_1fr_auto] bg-slate-50 px-4 py-3 text-xs font-black text-slate-500"><span>录音文件</span><span>关联门店</span><span>操作</span></div><div className="divide-y divide-slate-100">{recordings.map((recording) => <div key={recording.id} className="grid gap-3 px-4 py-4 sm:grid-cols-[1fr_1fr_auto] sm:items-center"><div className="min-w-0"><p className="truncate text-sm font-bold">♪ {recording.filename}</p><p className="mt-1 text-xs text-slate-400">{recording.recommended ? "系统推荐" : "待人工关联"}</p></div><select value={assignments[recording.id] ?? ""} onChange={(event) => setAssignments((current) => ({ ...current, [recording.id]: Number(event.target.value) }))} className="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[#137161]"><option value="">选择门店任务</option>{matches.tasks.map((task) => <option key={task.id} value={task.id}>{task.store_name} · {task.customer_id}</option>)}</select><button onClick={() => removeRecording(recording.id)} disabled={batch?.status === "submitted"} className="justify-self-start rounded-lg px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:text-slate-300">删除</button></div>)}</div></div>}
+    </section>
+
+    <section className={`mt-6 flex flex-col gap-5 rounded-2xl bg-[#102c28] p-6 text-white shadow-lg sm:flex-row sm:items-center sm:justify-between ${!recordings.length ? "opacity-60" : ""}`}><div><span className="text-xs font-black tracking-[0.16em] text-emerald-300">STEP 03</span><h2 className="mt-1 text-xl font-black">确认关联并提交分析</h2><p className="mt-1 text-sm text-slate-300">{recordings.length ? `${recordings.length} 段录音 · ${Object.keys(assignments).length} 段已关联` : "上传录音后可提交"}</p></div><div className="flex gap-3"><button disabled={!recordings.length || busy !== null || batch?.status === "submitted"} onClick={() => saveMatches(false)} className="rounded-xl border border-white/30 px-4 py-3 text-sm font-bold hover:bg-white/10 disabled:opacity-40">保存关联</button><button disabled={!recordings.length || busy !== null || batch?.status === "submitted"} onClick={() => saveMatches(true)} className="rounded-xl bg-emerald-400 px-5 py-3 text-sm font-black text-[#102c28] hover:bg-emerald-300 disabled:bg-slate-600 disabled:text-slate-300">{batch?.status === "submitted" ? "✓ 已提交分析" : busy === "submit" ? "提交中…" : "提交 AI 分析 →"}</button></div></section>
+  </main></AppShell>;
 }
