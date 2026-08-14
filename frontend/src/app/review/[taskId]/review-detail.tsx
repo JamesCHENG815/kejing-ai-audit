@@ -63,6 +63,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
   const [task, setTask] = useState<ReviewTask | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const evidenceEndRef = useRef<number | null>(null);
+  const submitNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [activeRecording, setActiveRecording] = useState<Recording | null>(null);
@@ -75,6 +76,11 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [showHistory, setShowHistory] = useState(false);
+  const [showSubmitNotice, setShowSubmitNotice] = useState(false);
+
+  useEffect(() => () => {
+    if (submitNoticeTimerRef.current) clearTimeout(submitNoticeTimerRef.current);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -189,6 +195,9 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
     setTask((current) => current ? { ...current, status: "completed" } : current);
     setHistory((current) => [{ who: "当前经理", when: new Date().toLocaleString("zh-CN", { hour12: false }), action: "提交并完成审核" }, ...current]);
     setMessage("审核已提交完成。");
+    setShowSubmitNotice(true);
+    if (submitNoticeTimerRef.current) clearTimeout(submitNoticeTimerRef.current);
+    submitNoticeTimerRef.current = setTimeout(() => setShowSubmitNotice(false), 3000);
     setBusy(null);
   }
 
@@ -197,6 +206,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
   }
 
   return <div className="min-h-screen bg-[#f3f6f5] text-slate-950">
+    {showSubmitNotice && <div role="status" aria-live="polite" className="fixed left-1/2 top-5 z-50 flex -translate-x-1/2 items-center gap-3 rounded-2xl border border-emerald-100 bg-white px-4 py-3 text-left shadow-[0_16px_40px_rgba(15,61,53,0.18)]"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-lg font-black text-emerald-700">✓</span><span><strong className="block text-sm font-black text-slate-900">提交成功</strong><span className="mt-0.5 block text-xs text-slate-500">审核结果已保存</span></span></div>}
     <header className="border-b border-slate-200 bg-white">
       <div className="mx-auto flex max-w-[1800px] flex-col gap-4 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
         <div>
