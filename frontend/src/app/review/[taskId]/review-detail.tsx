@@ -207,7 +207,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <a href={`${API_BASE_URL}/api/review-tasks/export`} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold">导出结果</a>
+          <a href={`${API_BASE_URL}/api/review-tasks/${taskId}/export`} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold">导出当前门店</a>
           <button onClick={() => setShowHistory((value) => !value)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold">审核历史 {showHistory ? "↑" : "↓"}</button>
           <button onClick={saveDraft} disabled={busy !== null} className="rounded-xl border border-[#0d5b4f] px-4 py-2.5 text-sm font-bold text-[#0d5b4f]">{busy === "draft" ? "保存中…" : "保存草稿"}</button>
           <button onClick={submitReview} disabled={busy !== null} className="rounded-xl bg-[#0d5b4f] px-5 py-2.5 text-sm font-black text-white">{busy === "submit" ? "提交中…" : "提交完成审核"}</button>

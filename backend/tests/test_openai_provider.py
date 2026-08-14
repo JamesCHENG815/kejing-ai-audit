@@ -6,6 +6,7 @@ from app.services.analysis_service import (
     TranscriptReference,
     _ModelExtractedField,
     _ModelExtractionResponse,
+    _audio_chunk_ranges,
 )
 from app.services import analysis_service
 from app.settings import AnalysisSettings
@@ -97,6 +98,23 @@ def test_openai_transcription_chunks_long_audio_and_restores_timeline(
     assert [(item.start_seconds, item.end_seconds) for item in segments] == [
         (1.0, 2.0),
         (301.0, 302.0),
+    ]
+
+
+def test_audio_chunks_merge_tiny_final_tail():
+    assert _audio_chunk_ranges(901.4, 300) == [
+        (0.0, 300.0),
+        (300.0, 300.0),
+        (600.0, 301.4),
+    ]
+
+
+def test_audio_chunks_keep_normal_final_chunk():
+    assert _audio_chunk_ranges(920.0, 300) == [
+        (0.0, 300.0),
+        (300.0, 300.0),
+        (600.0, 300.0),
+        (900.0, 20.0),
     ]
 
 

@@ -20,6 +20,7 @@ class AnalysisSettings:
     audio_chunk_seconds: int = 300
     proxy_url: str | None = None
     request_timeout_seconds: float = 600.0
+    max_retries: int = 4
 
     @classmethod
     def from_env(cls) -> "AnalysisSettings":
@@ -39,4 +40,5 @@ class AnalysisSettings:
             request_timeout_seconds=max(
                 30.0, float(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "600"))
             ),
+            max_retries=max(0, int(os.getenv("OPENAI_MAX_RETRIES", "4"))),
         )

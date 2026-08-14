@@ -69,6 +69,7 @@ class ReviewTaskResponse(BaseModel):
     store: str
     visitor: str
     status: str
+    has_recording: bool = Field(serialization_alias="hasRecording")
     updated_at: str = Field(serialization_alias="updatedAt")
     stats: ReviewStats
     address: str = "—"

@@ -37,6 +37,7 @@ from app.settings import AnalysisSettings
 
 
 logger = logging.getLogger(__name__)
+MIN_AUDIO_CHUNK_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -133,8 +134,7 @@ def _chunk_audio(audio_path: Path, duration: float, chunk_seconds: int):
         )
     with tempfile.TemporaryDirectory(prefix="kejing-audio-") as directory:
         chunks: list[tuple[Path, float]] = []
-        offset = 0.0
-        while offset < duration:
+        for offset, chunk_duration in _audio_chunk_ranges(duration, chunk_seconds):
             output_path = Path(directory) / f"chunk-{len(chunks):04d}.m4a"
             completed = subprocess.run(
                 [
@@ -145,7 +145,7 @@ def _chunk_audio(audio_path: Path, duration: float, chunk_seconds: int):
                     "-ss",
                     str(offset),
                     "-t",
-                    str(min(chunk_seconds, duration - offset)),
+                    str(chunk_duration),
                     "-i",
                     str(audio_path),
                     "-vn",
@@ -168,8 +168,25 @@ def _chunk_audio(audio_path: Path, duration: float, chunk_seconds: int):
                     f"录音分片失败：{completed.stderr.strip() or 'ffmpeg 未生成文件'}"
                 )
             chunks.append((output_path, offset))
-            offset += chunk_seconds
         yield chunks
+
+
+def _audio_chunk_ranges(
+    duration: float, chunk_seconds: int
+) -> list[tuple[float, float]]:
+    """Split audio without leaving a tiny, failure-prone final request."""
+    ranges: list[tuple[float, float]] = []
+    offset = 0.0
+    while offset < duration:
+        remaining = duration - offset
+        chunk_duration = (
+            remaining
+            if remaining <= chunk_seconds + MIN_AUDIO_CHUNK_SECONDS
+            else float(chunk_seconds)
+        )
+        ranges.append((offset, chunk_duration))
+        offset += chunk_duration
+    return ranges
 
 
 class OpenAIAnalysisProvider:
@@ -192,6 +209,7 @@ class OpenAIAnalysisProvider:
         self.client = OpenAI(
             api_key=self.settings.openai_api_key,
             http_client=http_client,
+            max_retries=self.settings.max_retries,
         )
 
     def _transcribe_single(self, audio_path: Path) -> list[TranscribedSegmentData]:

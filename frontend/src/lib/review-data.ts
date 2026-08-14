@@ -8,6 +8,7 @@ export type ReviewTask = {
   store: string;
   visitor: string;
   status: TaskStatus;
+  hasRecording: boolean;
   updatedAt: string;
   stats: Record<FieldStatus, number>;
   address?: string;

@@ -96,6 +96,7 @@ def _load_tasks(db: Session) -> list[AuditTask]:
             selectinload(AuditTask.excel_values),
             selectinload(AuditTask.ai_results),
             selectinload(AuditTask.human_reviews),
+            selectinload(AuditTask.task_recordings),
         )
         .order_by(AuditTask.updated_at.desc(), AuditTask.id.desc())
     )
@@ -169,6 +170,7 @@ def _task_response(task: AuditTask) -> ReviewTaskResponse:
         store=task.store_name,
         visitor=task.visitor,
         status=_task_status(task.status),
+        has_recording=bool(task.task_recordings),
         updated_at=_datetime_text(task.updated_at),
         stats=ReviewStats(**{name: counts[name] for name in FIELD_STATUSES}),
         address=address,

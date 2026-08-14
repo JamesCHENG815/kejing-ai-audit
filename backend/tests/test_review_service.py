@@ -28,6 +28,7 @@ def test_review_detail_includes_store_metadata_and_analysis_flags(db_session):
     detail = review_task_detail(db_session, task.id)
 
     assert detail.task.status == "analyzing"
+    assert detail.task.has_recording is True
     assert detail.task.address == "广东省广州市测试路1号"
     assert detail.task.visit_date == "2026-08-11"
     assert detail.has_transcript is True
@@ -42,3 +43,13 @@ def test_review_detail_reports_missing_transcript_and_ai(db_session):
 
     assert detail.has_transcript is False
     assert detail.has_ai_analysis is False
+
+
+def test_review_detail_reports_task_without_recording(db_session):
+    task, _recording = create_pending_task(db_session)
+    task.task_recordings.clear()
+    db_session.commit()
+
+    detail = review_task_detail(db_session, task.id)
+
+    assert detail.task.has_recording is False

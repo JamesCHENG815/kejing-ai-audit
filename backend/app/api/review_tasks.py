@@ -1,6 +1,7 @@
 import csv
 import io
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -32,6 +33,11 @@ from app.services.review_service import (
 
 router = APIRouter(prefix="/api/review-tasks", tags=["经理审核"])
 DbSession = Annotated[Session, Depends(get_db)]
+CSV_HEADERS = [
+    "批次ID", "任务ID", "门店ID", "门店名称", "拜访人", "字段名称",
+    "原始Excel值", "AI识别值", "最终人工值", "修改原因", "字段审核状态",
+    "任务状态", "更新时间",
+]
 
 
 def _provider() -> OpenAIAnalysisProvider:
@@ -46,6 +52,31 @@ def _analyze(db: Session, task_id: int, *, force: bool):
         return analyze_task(db, task_id, _provider(), force=force)
     except AnalysisProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _review_export_response(details, filename: str) -> StreamingResponse:
+    output = io.StringIO()
+    output.write("\ufeff")
+    writer = csv.writer(output)
+    writer.writerow(CSV_HEADERS)
+    for detail in details:
+        task = detail.task
+        for field in detail.fields:
+            writer.writerow(
+                [
+                    task.batch_id, task.id, task.customer_id, task.store, task.visitor,
+                    field.label, field.excel, field.ai, field.final, field.reason,
+                    field.status, task.status, task.updated_at,
+                ]
+            )
+    response = StreamingResponse(
+        iter([output.getvalue()]), media_type="text/csv; charset=utf-8"
+    )
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="review-result.csv"; '
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
+    return response
 
 
 @router.post("/analyze-pending", response_model=AnalyzePendingResponse)
@@ -66,31 +97,18 @@ def get_review_tasks(db: DbSession):
 
 @router.get("/export")
 def export_review_tasks(db: DbSession):
-    output = io.StringIO()
-    output.write("\ufeff")
-    writer = csv.writer(output)
-    writer.writerow(
-        [
-            "批次ID", "任务ID", "门店ID", "门店名称", "拜访人", "字段名称",
-            "原始Excel值", "AI识别值", "最终人工值", "修改原因", "字段审核状态",
-            "任务状态", "更新时间",
-        ]
+    details = [
+        review_task_detail(db, int(task.id)) for task in list_review_tasks(db)
+    ]
+    return _review_export_response(details, "全部门店审核结果.csv")
+
+
+@router.get("/{task_id}/export")
+def export_review_task(task_id: int, db: DbSession):
+    detail = review_task_detail(db, task_id)
+    return _review_export_response(
+        [detail], f"{detail.task.store}_审核结果.csv"
     )
-    for task in list_review_tasks(db):
-        detail = review_task_detail(db, int(task.id))
-        for field in detail.fields:
-            writer.writerow(
-                [
-                    task.batch_id, task.id, task.customer_id, task.store, task.visitor,
-                    field.label, field.excel, field.ai, field.final, field.reason,
-                    field.status, task.status, task.updated_at,
-                ]
-            )
-    response = StreamingResponse(iter([output.getvalue()]), media_type="text/csv; charset=utf-8")
-    response.headers["Content-Disposition"] = (
-        'attachment; filename="kejing-audit-review-results.csv"'
-    )
-    return response
 
 
 @router.post("/{task_id}/analyze", response_model=AnalyzeTaskResponse)
