@@ -52,11 +52,11 @@ def parse_visit_excel(file: BinaryIO) -> list[dict[str, Any]]:
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"无法读取 Excel 文件：{exc}") from exc
 
-    if "真实拜访数据" not in workbook.sheetnames:
+    if "拜访数据" not in workbook.sheetnames:
         workbook.close()
-        raise HTTPException(status_code=422, detail="Excel 中缺少“真实拜访数据”工作表")
+        raise HTTPException(status_code=422, detail="Excel 中缺少“拜访数据”工作表")
 
-    sheet = workbook["真实拜访数据"]
+    sheet = workbook["拜访数据"]
     rows = sheet.iter_rows(values_only=True)
     headers = [str(value).strip() if value is not None else "" for value in next(rows, ())]
     required = {"POI_ID", "门店名称", "拜访人"}
@@ -103,7 +103,7 @@ def parse_visit_excel(file: BinaryIO) -> list[dict[str, Any]]:
     workbook.close()
 
     if not visits:
-        raise HTTPException(status_code=422, detail="未在“真实拜访数据”中找到有效门店")
+        raise HTTPException(status_code=422, detail="未在“拜访数据”中找到有效门店")
     return visits
 
 

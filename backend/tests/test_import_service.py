@@ -8,7 +8,7 @@ from app.services.import_service import parse_visit_excel
 def test_excel_parser_filters_images_and_keeps_blank_audit_targets():
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "真实拜访数据"
+    sheet.title = "拜访数据"
     sheet.append(
         [
             "POI_ID",
