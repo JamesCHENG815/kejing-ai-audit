@@ -165,6 +165,7 @@ class AnalyzeTaskResponse(BaseModel):
 class AnalyzePendingRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
     force: bool = False
+    batch_id: int | None = Field(default=None, ge=1)
 
 
 class AnalyzePendingResponse(BaseModel):

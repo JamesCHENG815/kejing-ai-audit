@@ -34,6 +34,12 @@ function formatTime(value: number) {
   return `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, "0")}`;
 }
 
+function formatPreciseTime(value: number) {
+  const minutes = Math.floor(value / 60);
+  const seconds = (value % 60).toFixed(1).padStart(4, "0");
+  return `${minutes}:${seconds}`;
+}
+
 function shortLabel(field: ReviewField) {
   const brand = ["马爹利", "轩尼诗", "人头马", "白酒", "威士忌"].find((item) => field.key.includes(item));
   return brand ?? field.label;
@@ -56,6 +62,7 @@ function groupStatus(group: ReviewField[]) {
 export default function ReviewDetail({ taskId }: { taskId: string }) {
   const [task, setTask] = useState<ReviewTask | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const evidenceEndRef = useRef<number | null>(null);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [activeRecording, setActiveRecording] = useState<Recording | null>(null);
@@ -97,9 +104,10 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
   const confirmedCount = fields.filter((field) => field.confirmed).length;
   const activeTranscript = transcripts.filter((line) => line.recordingId === activeRecording?.id);
 
-  function seek(recordingId: string, time: number) {
+  function seek(recordingId: string, time: number, endTime?: number) {
     const recording = recordings.find((item) => item.id === recordingId) ?? activeRecording;
     if (!recording) return;
+    evidenceEndRef.current = endTime ?? null;
     setActiveRecording(recording);
     setCurrentTime(time);
     window.setTimeout(() => {
@@ -114,12 +122,19 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
     setMessage("");
   }
 
-  function confirmGroup(group: ReviewField[]) {
+  function toggleGroupConfirmation(group: ReviewField[]) {
+    const keys = new Set(group.map((field) => field.key));
+    if (group.every((field) => field.confirmed)) {
+      setFields((current) => current.map((field) => keys.has(field.key) ? { ...field, confirmed: false } : field));
+      setError("");
+      setMessage("已取消确认，可以继续修改。");
+      return;
+    }
     const invalid = group.find((field) => field.final !== field.excel && !field.reason.trim());
     if (invalid) return setError(`“${invalid.label}”修改了原值，请填写修改原因`);
-    const keys = new Set(group.map((field) => field.key));
     setFields((current) => current.map((field) => keys.has(field.key) ? { ...field, confirmed: true } : field));
     setError("");
+    setMessage("字段已确认。如需修改，请先点击“取消”。");
   }
 
   function confirmMatched() {
@@ -213,9 +228,9 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
         <aside className="space-y-4 xl:sticky xl:top-4 xl:self-start">
           <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-100 p-5"><h2 className="font-black">关联录音</h2><p className="mt-1 text-xs text-slate-500">选择录音并查看转写证据</p></div>
-            {recordings.length === 0 ? <p className="p-5 text-sm text-slate-400">此任务没有关联录音</p> : recordings.map((recording) => <button key={recording.id} onClick={() => { setActiveRecording(recording); setCurrentTime(0); }} className={`flex w-full items-center gap-3 border-b border-slate-100 px-5 py-4 text-left last:border-0 ${activeRecording?.id === recording.id ? "bg-[#eaf5f1]" : "hover:bg-slate-50"}`}><span className={`flex h-9 w-9 items-center justify-center rounded-full ${activeRecording?.id === recording.id ? "bg-[#0d5b4f] text-white" : "bg-slate-100"}`}>▶</span><span className="min-w-0"><strong className="block truncate text-sm">{recording.name}</strong><span className="text-xs text-slate-400">{recording.id} · {formatTime(recording.duration)}</span></span></button>)}
+            {recordings.length === 0 ? <p className="p-5 text-sm text-slate-400">此任务没有关联录音</p> : recordings.map((recording) => <button key={recording.id} onClick={() => { evidenceEndRef.current = null; setActiveRecording(recording); setCurrentTime(0); }} className={`flex w-full items-center gap-3 border-b border-slate-100 px-5 py-4 text-left last:border-0 ${activeRecording?.id === recording.id ? "bg-[#eaf5f1]" : "hover:bg-slate-50"}`}><span className={`flex h-9 w-9 items-center justify-center rounded-full ${activeRecording?.id === recording.id ? "bg-[#0d5b4f] text-white" : "bg-slate-100"}`}>▶</span><span className="min-w-0"><strong className="block truncate text-sm">{recording.name}</strong><span className="text-xs text-slate-400">{recording.id} · {formatTime(recording.duration)}</span></span></button>)}
           </section>
-          {activeRecording && <section className="rounded-2xl bg-[#102c28] p-5 text-white shadow-lg"><p className="truncate text-sm font-black">{activeRecording.name}</p><audio ref={audioRef} src={activeRecording.url} controls className="mt-4 w-full" onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}>浏览器不支持音频播放</audio><p className="mt-2 text-right font-mono text-xs text-emerald-200">当前位置 {formatTime(currentTime)}</p></section>}
+          {activeRecording && <section className="rounded-2xl bg-[#102c28] p-5 text-white shadow-lg"><p className="truncate text-sm font-black">{activeRecording.name}</p><audio ref={audioRef} src={activeRecording.url} controls className="mt-4 w-full" onTimeUpdate={(event) => { const time = event.currentTarget.currentTime; setCurrentTime(time); if (evidenceEndRef.current !== null && time >= evidenceEndRef.current) { event.currentTarget.pause(); evidenceEndRef.current = null; } }}>浏览器不支持音频播放</audio><p className="mt-2 text-right font-mono text-xs text-emerald-200">当前位置 {formatPreciseTime(currentTime)}</p></section>}
           <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-100 p-5"><h2 className="font-black">转写文本</h2><p className="mt-1 text-xs text-slate-500">浅绿色段落为 AI 证据</p></div>
             {!hasTranscript ? <p className="p-5 text-sm font-bold text-slate-400">暂无 AI 分析结果：尚无录音转写</p> : <div className="max-h-[480px] space-y-1 overflow-y-auto p-3">{activeTranscript.length ? activeTranscript.map((line) => <button key={`${line.recordingId}-${line.time}`} onClick={() => seek(line.recordingId, line.time)} className={`w-full rounded-xl p-3 text-left ${line.evidence ? "bg-emerald-50 ring-1 ring-emerald-100" : "hover:bg-slate-50"}`}><div className="flex items-center gap-2"><span className="font-mono text-xs font-black text-[#137161]">{formatTime(line.time)}</span><span className="text-xs text-slate-400">{line.speaker}</span>{line.evidence && <span className="ml-auto rounded bg-white px-2 py-0.5 text-[10px] font-bold text-emerald-700">AI 证据</span>}</div><p className="mt-1 text-sm leading-6 text-slate-700">{line.text}</p></button>) : <p className="p-2 text-sm text-slate-400">当前录音暂无转写文本</p>}</div>}
@@ -230,7 +245,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
 
           {modules.map((module) => <section key={module.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 bg-slate-50 px-5 py-4"><h3 className="text-lg font-black text-[#0d5b4f]">{module.title}</h3><p className="mt-1 text-xs text-slate-500">{module.description}</p></div>
-            {module.groups.length === 0 ? <p className="px-5 py-8 text-center text-sm text-slate-400">当前任务没有该模块字段</p> : <div className="overflow-x-auto"><table className="w-full min-w-[900px] table-fixed text-left"><colgroup><col className="w-[15%]"/><col className="w-[16%]"/><col className="w-[13%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[12%]"/><col className="w-[14%]"/><col className="w-[8%]"/><col className="w-[7%]"/></colgroup><thead className="bg-white text-[11px] text-slate-500"><tr>{["字段名称", "Excel 填报值", "AI 录音值", "置信度", "状态", "人工最终值", "修改原因", "录音证据", "确认"].map((label) => <th key={label} className="px-2 py-3 font-black">{label}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{module.groups.map((group, groupIndex) => {
+            {module.groups.length === 0 ? <p className="px-5 py-8 text-center text-sm text-slate-400">当前任务没有该模块字段</p> : <div className="overflow-x-auto"><table className="w-full min-w-[1120px] table-fixed text-left"><colgroup><col className="w-[15%]"/><col className="w-[14%]"/><col className="w-[12%]"/><col className="w-[7%]"/><col className="w-[8%]"/><col className="w-[12%]"/><col className="w-[13%]"/><col className="w-[13%]"/><col className="w-[6%]"/></colgroup><thead className="bg-white text-[11px] text-slate-500"><tr>{["字段名称", "Excel 填报值", "AI 录音值", "置信度", "状态", "人工最终值", "修改原因", "录音证据", "确认"].map((label) => <th key={label} className="px-2 py-3 font-black">{label}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{module.groups.map((group, groupIndex) => {
               const status = groupStatus(group);
               const isProduct = module.id === "products";
               const confirmed = group.every((field) => field.confirmed);
@@ -240,10 +255,10 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
                 <td className="px-2 py-3 text-xs font-bold text-[#0d5b4f]">{!hasAiAnalysis ? <span className="font-medium text-slate-400">暂无 AI 分析结果</span> : <div className="space-y-2">{group.map((field) => <p key={field.key} className="min-h-5 break-words">{field.ai} {field.unit}</p>)}</div>}</td>
                 <td className="px-2 py-3 text-xs font-black">{!hasAiAnalysis ? "—" : <div className="space-y-2">{group.map((field) => <p key={field.key} className="min-h-5">{Math.round(field.confidence * 100)}%</p>)}</div>}</td>
                 <td className="px-2 py-3"><span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-1 text-[10px] font-bold ${fieldStatusMeta[status].className}`}><span className={`h-1.5 w-1.5 rounded-full ${fieldStatusMeta[status].dot}`}/>{fieldStatusMeta[status].label}</span></td>
-                <td className="px-2 py-3"><div className="space-y-2">{group.map((field) => <input key={field.key} aria-label={`${field.label}人工最终值`} value={field.final} onChange={(event) => updateField(field.key, { final: event.target.value, confirmed: false })} className="block h-8 w-full min-w-0 rounded-lg border border-slate-300 px-2 text-xs outline-none focus:border-[#137161]"/>)}</div></td>
-                <td className="px-2 py-3"><div className="space-y-2">{group.map((field) => <input key={field.key} aria-label={`${field.label}修改原因`} value={field.reason} onChange={(event) => updateField(field.key, { reason: event.target.value, confirmed: false })} placeholder="修改时必填" className="block h-8 w-full min-w-0 rounded-lg border border-slate-300 px-2 text-xs outline-none focus:border-[#137161]"/>)}</div></td>
-                <td className="px-2 py-3"><div className="space-y-2">{group.map((field) => field.evidence ? <button key={field.key} onClick={() => seek(field.evidence!.recordingId, field.evidence!.start)} className="block h-8 whitespace-nowrap rounded-lg bg-slate-900 px-2 font-mono text-[10px] font-bold text-white">▶ {formatTime(field.evidence.start)}</button> : <span key={field.key} className="block h-8 pt-2 text-slate-400">—</span>)}</div></td>
-                <td className="px-2 py-3"><button onClick={() => confirmGroup(group)} className={`whitespace-nowrap rounded-lg px-2 py-2 text-[10px] font-black ${confirmed ? "bg-emerald-100 text-emerald-700" : "bg-[#0d5b4f] text-white"}`}>{confirmed ? "✓ 已确认" : "确认"}</button></td>
+                <td className="px-2 py-3"><div className="space-y-2">{group.map((field) => <input key={field.key} aria-label={`${field.label}人工最终值`} value={field.final} disabled={confirmed} onChange={(event) => updateField(field.key, { final: event.target.value, confirmed: false })} className="block h-8 w-full min-w-0 rounded-lg border border-slate-300 px-2 text-xs outline-none focus:border-[#137161] disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500"/>)}</div></td>
+                <td className="px-2 py-3"><div className="space-y-2">{group.map((field) => <input key={field.key} aria-label={`${field.label}修改原因`} value={field.reason} disabled={confirmed} onChange={(event) => updateField(field.key, { reason: event.target.value, confirmed: false })} placeholder="修改时必填" className="block h-8 w-full min-w-0 rounded-lg border border-slate-300 px-2 text-xs outline-none focus:border-[#137161] disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500"/>)}</div></td>
+                <td className="px-2 py-3"><div className="space-y-2">{group.map((field) => field.evidence ? <button key={field.key} title={field.evidence.text} onClick={() => seek(field.evidence!.recordingId, field.evidence!.start, field.evidence!.end)} className="block h-8 w-full whitespace-nowrap rounded-lg bg-slate-900 px-2 text-center font-mono text-[10px] font-bold text-white">▶ {formatPreciseTime(field.evidence.start)}–{formatPreciseTime(field.evidence.end)}</button> : <span key={field.key} className="block h-8 pt-2 text-slate-400">—</span>)}</div></td>
+                <td className="px-2 py-3"><button onClick={() => toggleGroupConfirmation(group)} className={`w-full whitespace-nowrap rounded-lg px-2 py-2 text-[10px] font-black ${confirmed ? "bg-rose-50 text-rose-700 ring-1 ring-rose-200" : "bg-[#0d5b4f] text-white"}`}>{confirmed ? "取消" : "确认"}</button></td>
               </tr>;
             })}</tbody></table></div>}
           </section>)}

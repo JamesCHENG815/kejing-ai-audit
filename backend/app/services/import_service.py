@@ -324,7 +324,8 @@ def submit_batch(db: Session, batch_id: int) -> tuple[int, int]:
     if unconfirmed:
         raise HTTPException(status_code=409, detail="请先确认所有录音关联")
     for task in batch.tasks:
-        task.status = "pending_analysis"
+        # 只有关联了录音的门店需要进入 AI 分析；无录音门店仍可进入人工审核。
+        task.status = "pending_analysis" if task.task_recordings else "pending"
     for link in links:
         link.recording.status = "queued"
     batch.status = "submitted"

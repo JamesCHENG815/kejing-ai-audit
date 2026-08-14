@@ -66,3 +66,24 @@ def test_analyze_pending_endpoint_processes_pending_tasks(db_session, monkeypatc
         assert db_session.get(AuditTask, second.id).status == "pending_analysis"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_analyze_pending_endpoint_can_be_scoped_to_batch(db_session, monkeypatch):
+    first, _ = create_pending_task(db_session)
+    second, _ = create_pending_task(db_session)
+    app.dependency_overrides[get_db] = lambda: db_session
+    monkeypatch.setattr(review_tasks, "_provider", lambda: ApiFakeProvider())
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/review-tasks/analyze-pending",
+                json={"limit": 100, "batch_id": second.import_batch_id},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["requested_count"] == 1
+        assert body["results"][0]["task_id"] == second.id
+        assert db_session.get(AuditTask, first.id).status == "pending_analysis"
+        assert db_session.get(AuditTask, second.id).status == "pending"
+    finally:
+        app.dependency_overrides.clear()

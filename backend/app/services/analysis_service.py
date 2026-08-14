@@ -609,12 +609,16 @@ def analyze_task(
     )
 
 
-def pending_task_ids(db: Session, limit: int) -> list[int]:
+def pending_task_ids(
+    db: Session, limit: int, *, batch_id: int | None = None
+) -> list[int]:
+    statement = select(AuditTask.id).where(
+        AuditTask.status == "pending_analysis"
+    )
+    if batch_id is not None:
+        statement = statement.where(AuditTask.import_batch_id == batch_id)
     return list(
         db.scalars(
-            select(AuditTask.id)
-            .where(AuditTask.status == "pending_analysis")
-            .order_by(AuditTask.created_at, AuditTask.id)
-            .limit(limit)
+            statement.order_by(AuditTask.created_at, AuditTask.id).limit(limit)
         )
     )

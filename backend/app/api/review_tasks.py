@@ -50,7 +50,7 @@ def _analyze(db: Session, task_id: int, *, force: bool):
 
 @router.post("/analyze-pending", response_model=AnalyzePendingResponse)
 def analyze_pending(payload: AnalyzePendingRequest, db: DbSession):
-    task_ids = pending_task_ids(db, payload.limit)
+    task_ids = pending_task_ids(db, payload.limit, batch_id=payload.batch_id)
     results = [_analyze(db, task_id, force=payload.force) for task_id in task_ids]
     return AnalyzePendingResponse(
         requested_count=len(task_ids),
