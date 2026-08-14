@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from app.api import review_tasks
+from app.api import import_batches, review_tasks
 from app.database import get_db
 from app.main import app
 from app.models import AuditTask
@@ -85,5 +85,26 @@ def test_analyze_pending_endpoint_can_be_scoped_to_batch(db_session, monkeypatch
         assert body["results"][0]["task_id"] == second.id
         assert db_session.get(AuditTask, first.id).status == "pending_analysis"
         assert db_session.get(AuditTask, second.id).status == "pending"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_submit_batch_schedules_automatic_analysis(db_session, monkeypatch):
+    task, _ = create_pending_task(db_session)
+    scheduled: list[int] = []
+    app.dependency_overrides[get_db] = lambda: db_session
+    monkeypatch.setattr(
+        import_batches,
+        "analyze_submitted_batch",
+        lambda batch_id: scheduled.append(batch_id),
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/import-batches/{task.import_batch_id}/submit"
+            )
+        assert response.status_code == 200
+        assert scheduled == [task.import_batch_id]
+        assert db_session.get(AuditTask, task.id).status == "pending_analysis"
     finally:
         app.dependency_overrides.clear()

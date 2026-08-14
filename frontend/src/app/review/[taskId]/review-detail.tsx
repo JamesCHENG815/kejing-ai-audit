@@ -78,8 +78,10 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
 
   useEffect(() => {
     let active = true;
-    apiRequest<ReviewDetailResponse>(`/api/review-tasks/${taskId}`)
-      .then((data) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function loadDetail() {
+      try {
+        const data = await apiRequest<ReviewDetailResponse>(`/api/review-tasks/${taskId}`);
         if (!active) return;
         const resolvedRecordings = data.recordings.map((item) => ({
           ...item,
@@ -93,11 +95,15 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
         setHistory(data.history);
         setHasAiAnalysis(data.hasAiAnalysis);
         setHasTranscript(data.hasTranscript);
-      })
-      .catch((reason) => {
+        if (data.task.status === "analyzing") {
+          timer = setTimeout(loadDetail, 3000);
+        }
+      } catch (reason) {
         if (active) setError(reason instanceof Error ? reason.message : "审核任务加载失败");
-      });
-    return () => { active = false; };
+      }
+    }
+    loadDetail();
+    return () => { active = false; if (timer) clearTimeout(timer); };
   }, [taskId]);
 
   const modules = useMemo(() => buildReviewModules(fields), [fields]);
@@ -221,7 +227,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
       </section>
 
       {(error || message) && <div className={`mb-5 flex justify-between rounded-xl border px-4 py-3 text-sm font-bold ${error ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}><span>{error || message}</span><button onClick={() => { setError(""); setMessage(""); }}>×</button></div>}
-      {!hasAiAnalysis && <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm font-bold text-amber-800">暂无 AI 分析结果。当前仅展示 Excel 填报值，请先完成录音转写与 AI 字段提取。</div>}
+      {!hasAiAnalysis && <div className={`mb-5 rounded-xl border px-4 py-4 text-sm font-bold ${task.status === "analysis_failed" ? "border-rose-200 bg-rose-50 text-rose-800" : task.status === "analyzing" ? "border-blue-200 bg-blue-50 text-blue-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>{task.status === "analysis_failed" ? "AI 分析失败，请检查 OpenAI 配置或网络后重试。" : task.status === "analyzing" ? "AI 正在后台转写录音并提取字段，本页每 3 秒自动刷新。" : "暂无 AI 分析结果。当前仅展示 Excel 填报值，请先完成录音转写与 AI 字段提取。"}</div>}
       {showHistory && <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-black">审核历史</h2><div className="mt-4 space-y-3">{history.length ? history.map((item, index) => <div key={`${item.when}-${index}`} className="flex gap-3 text-sm"><span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#137161]"/><div><p><strong>{item.who}</strong> · {item.action}</p><p className="mt-0.5 text-xs text-slate-400">{item.when}</p></div></div>) : <p className="text-sm text-slate-400">暂无审核历史</p>}</div></section>}
 
       <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)] 2xl:grid-cols-[320px_minmax(0,1fr)]">

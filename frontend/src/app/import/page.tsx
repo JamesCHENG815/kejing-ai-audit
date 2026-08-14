@@ -31,13 +31,15 @@ export default function ImportPage() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [matchesExpanded, setMatchesExpanded] = useState(false);
 
   const recordings = useMemo(() => matches ? [...matches.tasks.flatMap((task) => task.recordings), ...matches.unassigned_recordings] : [], [matches]);
+  const visibleRecordings = matchesExpanded ? recordings : recordings.slice(0, 3);
   const submitted = batch?.status === "submitted" || batch?.status === "analyzed";
 
   function startNextBatch() {
     setExcel(null); setAudios([]); setBatch(null); setMatches(null); setAssignments({});
-    setDragging(null); setBusy(null); setProgress(0); setError(""); setNotice("");
+    setDragging(null); setBusy(null); setProgress(0); setError(""); setNotice(""); setMatchesExpanded(false);
     if (excelRef.current) excelRef.current.value = "";
     if (audioRef.current) audioRef.current.value = "";
   }
@@ -46,7 +48,7 @@ export default function ImportPage() {
     if (!file) return;
     if (!excelTypes.includes(ext(file.name))) return setError("Excel 仅支持 .xlsx 或 .xlsm 格式");
     if (file.size > MAX_EXCEL) return setError("Excel 文件不能超过 50 MB");
-    setExcel(file); setBatch(null); setMatches(null); setError(""); setNotice("");
+    setExcel(file); setBatch(null); setMatches(null); setError(""); setNotice(""); setMatchesExpanded(false);
   }
 
   function chooseAudios(files: FileList | File[]) {
@@ -104,7 +106,7 @@ export default function ImportPage() {
       if (submit) {
         await apiRequest(`/api/import-batches/${batch.id}/submit`, { method: "POST" });
         setBatch((current) => current ? { ...current, status: "submitted" } : current);
-        setAudios([]);
+        setAudios([]); setMatchesExpanded(false);
         setNotice("提交成功，AI 将在后台自动分析。你现在可以继续导入下一批。");
       } else {
         await loadMatches(batch.id); setNotice("录音与门店关联已保存。");
@@ -137,7 +139,7 @@ export default function ImportPage() {
       {busy === "audio" && <div className="mt-4"><div className="mb-1 flex justify-between text-xs font-bold text-slate-500"><span>录音上传中</span><span>{progress}%</span></div><div className="h-2 rounded-full bg-slate-100"><div className="h-full rounded-full bg-[#137161]" style={{ width: `${progress}%` }}/></div></div>}
       <div className="mt-4 flex justify-end"><button disabled={!audios.length || busy !== null} onClick={uploadAudios} className="rounded-xl border border-[#0d5b4f] px-5 py-2.5 text-sm font-bold text-[#0d5b4f] disabled:border-slate-200 disabled:text-slate-300">上传录音</button></div>
 
-      {matches && <div className="mt-7 overflow-hidden rounded-xl border border-slate-200"><div className="grid grid-cols-[1fr_auto] bg-slate-50 px-4 py-3 text-xs font-black text-slate-500"><span>录音与关联门店</span><span>操作</span></div><div className="divide-y divide-slate-100">{recordings.map((recording) => <div key={recording.id} className="grid gap-3 px-4 py-4"><div className="min-w-0"><p className="truncate text-sm font-bold">♪ {recording.filename}</p><p className="mt-1 text-xs text-slate-400">{recording.recommended ? "系统推荐" : "待人工关联"}</p></div><select value={assignments[recording.id] ?? ""} onChange={(event) => setAssignments((current) => ({ ...current, [recording.id]: Number(event.target.value) }))} className="min-w-0 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[#137161]"><option value="">选择门店任务</option>{matches.tasks.map((task) => <option key={task.id} value={task.id}>{task.store_name} · {task.customer_id}</option>)}</select><button onClick={() => removeRecording(recording.id)} disabled={batch?.status === "submitted"} className="justify-self-start rounded-lg px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:text-slate-300">删除</button></div>)}</div></div>}
+      {matches && <div className="mt-7 overflow-hidden rounded-xl border border-slate-200"><div className="flex items-center justify-between gap-3 bg-slate-50 px-4 py-3 text-xs font-black text-slate-500"><span>录音与关联门店 · {recordings.length} 段</span>{recordings.length > 3 && !submitted && <button onClick={() => setMatchesExpanded((value) => !value)} className="shrink-0 font-black text-[#137161]">{matchesExpanded ? "收起" : `展开全部 ${recordings.length} 段`}</button>}</div><div className="max-h-[360px] divide-y divide-slate-100 overflow-y-auto">{visibleRecordings.map((recording) => <div key={recording.id} className="grid gap-3 px-4 py-4"><div className="min-w-0"><p className="truncate text-sm font-bold">♪ {recording.filename}</p><p className="mt-1 text-xs text-slate-400">{recording.recommended ? "系统推荐" : "待人工关联"}</p></div><select value={assignments[recording.id] ?? ""} onChange={(event) => setAssignments((current) => ({ ...current, [recording.id]: Number(event.target.value) }))} className="min-w-0 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[#137161]"><option value="">选择门店任务</option>{matches.tasks.map((task) => <option key={task.id} value={task.id}>{task.store_name} · {task.customer_id}</option>)}</select><button onClick={() => removeRecording(recording.id)} disabled={batch?.status === "submitted"} className="justify-self-start rounded-lg px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:text-slate-300">删除</button></div>)}</div></div>}
     </section>
 
     <section className={`flex min-w-0 flex-col justify-start gap-6 rounded-2xl bg-[#102c28] p-6 text-white shadow-lg ${!recordings.length && !submitted ? "opacity-60" : ""}`}><div><span className="text-xs font-black tracking-[0.16em] text-emerald-300">STEP 03</span><h2 className="mt-1 text-xl font-black">{submitted ? "任务提交成功" : "确认关联并提交任务"}</h2><p className="mt-1 text-sm text-slate-300">{submitted ? `批次 #${batch.id} 已进入 AI 分析队列，无需在此等待。` : recordings.length ? `${recordings.length} 段录音 · ${Object.keys(assignments).length} 段已关联` : "上传录音后可提交"}</p></div>{submitted ? <div className="flex flex-col gap-4"><div className="rounded-xl border border-emerald-300/30 bg-emerald-300/10 p-4"><p className="font-black text-emerald-300">✓ 提交成功</p><p className="mt-1 text-sm text-slate-300">AI 将在后台自动分析，分析结果会进入经理审核工作台。</p></div><button onClick={startNextBatch} className="rounded-xl bg-emerald-400 px-5 py-3 text-sm font-black text-[#102c28] hover:bg-emerald-300">继续导入下一批 →</button></div> : <div className="flex flex-col gap-3 sm:flex-row xl:flex-col"><button disabled={!recordings.length || busy !== null} onClick={() => saveMatches(false)} className="rounded-xl border border-white/30 px-4 py-3 text-sm font-bold hover:bg-white/10 disabled:opacity-40">保存关联</button><button disabled={!recordings.length || busy !== null} onClick={() => saveMatches(true)} className="rounded-xl bg-emerald-400 px-5 py-3 text-sm font-black text-[#102c28] hover:bg-emerald-300 disabled:bg-slate-600 disabled:text-slate-300">{busy === "submit" ? "提交中…" : "提交审核任务 →"}</button></div>}</section>

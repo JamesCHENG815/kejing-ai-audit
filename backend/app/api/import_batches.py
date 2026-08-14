@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -21,6 +21,7 @@ from app.services.import_service import (
     update_matches,
     upload_recordings,
 )
+from app.services.analysis_service import analyze_submitted_batch
 
 
 router = APIRouter(prefix="/api/import-batches", tags=["文件导入"])
@@ -111,8 +112,9 @@ def put_matches(batch_id: int, payload: UpdateMatchesRequest, db: DbSession):
 
 
 @router.post("/{batch_id}/submit", response_model=SubmitBatchResponse)
-def submit(batch_id: int, db: DbSession):
+def submit(batch_id: int, background_tasks: BackgroundTasks, db: DbSession):
     task_count, recording_count = submit_batch(db, batch_id)
+    background_tasks.add_task(analyze_submitted_batch, batch_id)
     return SubmitBatchResponse(
         batch_id=batch_id,
         status="submitted",

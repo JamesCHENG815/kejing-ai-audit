@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 import tempfile
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.database import BACKEND_DIR
+from app.database import BACKEND_DIR, SessionLocal
 from app.field_rules import (
     EvidenceValue,
     determine_field_status,
@@ -33,6 +34,9 @@ from app.models import (
     TranscriptSegment,
 )
 from app.settings import AnalysisSettings
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -330,7 +334,7 @@ def _load_analysis_task(db: Session, task_id: int) -> AuditTask:
     task = db.scalar(statement)
     if task is None:
         raise HTTPException(status_code=404, detail="分析任务不存在")
-    if task.status not in {"pending_analysis", "pending"}:
+    if task.status not in {"pending_analysis", "analysis_failed", "pending"}:
         raise HTTPException(
             status_code=409,
             detail=f"任务状态 {task.status} 不允许执行分析",
@@ -587,7 +591,7 @@ def analyze_task(
             .select_from(AuditTask)
             .where(
                 AuditTask.import_batch_id == task.import_batch_id,
-                AuditTask.status == "pending_analysis",
+                AuditTask.status.in_(("pending_analysis", "analysis_failed")),
             )
         )
         if remaining == 0:
@@ -613,7 +617,7 @@ def pending_task_ids(
     db: Session, limit: int, *, batch_id: int | None = None
 ) -> list[int]:
     statement = select(AuditTask.id).where(
-        AuditTask.status == "pending_analysis"
+        AuditTask.status.in_(("pending_analysis", "analysis_failed"))
     )
     if batch_id is not None:
         statement = statement.where(AuditTask.import_batch_id == batch_id)
@@ -622,3 +626,45 @@ def pending_task_ids(
             statement.order_by(AuditTask.created_at, AuditTask.id).limit(limit)
         )
     )
+
+
+def analyze_submitted_batch(batch_id: int) -> None:
+    """Analyze a submitted batch after the HTTP response has been returned."""
+    db = SessionLocal()
+    try:
+        task_ids = pending_task_ids(db, 10_000, batch_id=batch_id)
+        if not task_ids:
+            return
+        try:
+            provider = OpenAIAnalysisProvider()
+        except Exception:
+            logger.exception("Unable to initialize AI provider for batch %s", batch_id)
+            for task_id in task_ids:
+                task = db.get(AuditTask, task_id)
+                if task:
+                    task.status = "analysis_failed"
+            batch = db.get(ImportBatch, batch_id)
+            if batch:
+                batch.status = "analysis_failed"
+            db.commit()
+            return
+
+        failed = False
+        for task_id in task_ids:
+            try:
+                analyze_task(db, task_id, provider)
+            except Exception:
+                db.rollback()
+                failed = True
+                task = db.get(AuditTask, task_id)
+                if task:
+                    task.status = "analysis_failed"
+                    db.commit()
+                logger.exception("AI analysis failed for task %s", task_id)
+        if failed:
+            batch = db.get(ImportBatch, batch_id)
+            if batch and batch.status != "analyzed":
+                batch.status = "analysis_failed"
+                db.commit()
+    finally:
+        db.close()

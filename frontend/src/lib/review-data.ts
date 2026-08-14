@@ -1,4 +1,4 @@
-export type TaskStatus = "pending" | "reviewing" | "completed";
+export type TaskStatus = "analyzing" | "analysis_failed" | "pending" | "reviewing" | "completed";
 export type FieldStatus = "matched" | "pending" | "conflict" | "missing";
 
 export type ReviewTask = {
@@ -85,6 +85,8 @@ export function buildReviewModules(source: ReviewField[]): ReviewModule[] {
 }
 
 export const taskStatusMeta: Record<TaskStatus, { label: string; className: string }> = {
+  analyzing: { label: "AI 分析中", className: "bg-blue-50 text-blue-700 ring-blue-200" },
+  analysis_failed: { label: "AI 分析失败", className: "bg-rose-50 text-rose-700 ring-rose-200" },
   pending: { label: "待审核", className: "bg-amber-50 text-amber-700 ring-amber-200" },
   reviewing: { label: "审核中", className: "bg-blue-50 text-blue-700 ring-blue-200" },
   completed: { label: "已完成", className: "bg-emerald-50 text-emerald-700 ring-emerald-200" },

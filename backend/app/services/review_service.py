@@ -35,6 +35,7 @@ from app.schemas import (
 FIELD_STATUSES = {"matched", "pending", "conflict", "missing"}
 REVIEWABLE_TASK_STATUSES = {
     "pending_analysis",
+    "analysis_failed",
     "pending",
     "reviewing",
     "completed",
@@ -76,6 +77,10 @@ def _task_status(value: str) -> str:
         return "completed"
     if value == "reviewing":
         return "reviewing"
+    if value == "pending_analysis":
+        return "analyzing"
+    if value == "analysis_failed":
+        return "analysis_failed"
     return "pending"
 
 

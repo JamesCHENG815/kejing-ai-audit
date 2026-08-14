@@ -18,11 +18,24 @@ export default function ReviewPage() {
 
   useEffect(() => {
     let active = true;
-    apiRequest<ReviewTask[]>("/api/review-tasks")
-      .then((data) => { if (active) setTasks(data); })
-      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "审核任务加载失败"); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function loadTasks() {
+      try {
+        const data = await apiRequest<ReviewTask[]>("/api/review-tasks");
+        if (!active) return;
+        setTasks(data);
+        setError("");
+        if (data.some((task) => task.status === "analyzing")) {
+          timer = setTimeout(loadTasks, 3000);
+        }
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : "审核任务加载失败");
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    loadTasks();
+    return () => { active = false; if (timer) clearTimeout(timer); };
   }, []);
 
   const batches = useMemo(() => [...new Set(tasks.map((task) => task.batchId))], [tasks]);
@@ -40,7 +53,7 @@ export default function ReviewPage() {
 
     <section className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{(["matched", "pending", "conflict", "missing"] as const).map((key) => <div key={key} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-sm font-bold text-slate-500">{fieldStatusMeta[key].label}字段</span><span className={`h-2.5 w-2.5 rounded-full ${fieldStatusMeta[key].dot}`}/></div><p className="mt-3 text-3xl font-black tabular-nums">{totals[key]}</p><p className="mt-1 text-xs text-slate-400">当前全部批次</p></div>)}</section>
 
-    <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="grid gap-3 lg:grid-cols-[1fr_auto_auto]"><label className="relative"><span className="sr-only">搜索任务</span><span className="absolute left-3 top-2.5 text-slate-400">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索门店名称、门店 ID 或拜访人" className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-sm outline-none focus:border-[#137161]"/></label><select value={batchId} onChange={(event) => setBatchId(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold outline-none"><option value="all">全部批次</option>{batches.map((id) => <option key={id} value={id}>批次 #{id}</option>)}</select><div className="flex overflow-x-auto rounded-xl bg-slate-100 p-1">{(["all", "pending", "reviewing", "completed"] as Filter[]).map((item) => <button key={item} onClick={() => setFilter(item)} className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-bold ${filter === item ? "bg-white text-[#0d5b4f] shadow-sm" : "text-slate-500"}`}>{item === "all" ? "全部" : taskStatusMeta[item].label}</button>)}</div></div></section>
+    <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="grid gap-3 lg:grid-cols-[1fr_auto_auto]"><label className="relative"><span className="sr-only">搜索任务</span><span className="absolute left-3 top-2.5 text-slate-400">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索门店名称、门店 ID 或拜访人" className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-sm outline-none focus:border-[#137161]"/></label><select value={batchId} onChange={(event) => setBatchId(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold outline-none"><option value="all">全部批次</option>{batches.map((id) => <option key={id} value={id}>批次 #{id}</option>)}</select><div className="flex overflow-x-auto rounded-xl bg-slate-100 p-1">{(["all", "analyzing", "analysis_failed", "pending", "reviewing", "completed"] as Filter[]).map((item) => <button key={item} onClick={() => setFilter(item)} className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-bold ${filter === item ? "bg-white text-[#0d5b4f] shadow-sm" : "text-slate-500"}`}>{item === "all" ? "全部" : taskStatusMeta[item].label}</button>)}</div></div></section>
 
     <div className="mt-5 flex items-center justify-between text-sm text-slate-500"><span>显示 <strong className="text-slate-900">{filtered.length}</strong> / {tasks.length} 条任务</span><span>更新时间倒序</span></div>
 

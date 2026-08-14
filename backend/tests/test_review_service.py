@@ -27,6 +27,7 @@ def test_review_detail_includes_store_metadata_and_analysis_flags(db_session):
 
     detail = review_task_detail(db_session, task.id)
 
+    assert detail.task.status == "analyzing"
     assert detail.task.address == "广东省广州市测试路1号"
     assert detail.task.visit_date == "2026-08-11"
     assert detail.has_transcript is True
