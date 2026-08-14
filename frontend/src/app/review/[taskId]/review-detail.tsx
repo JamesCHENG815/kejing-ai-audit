@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL, apiRequest } from "@/lib/api";
 import {
   buildReviewModules,
@@ -72,11 +72,26 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
   const [history, setHistory] = useState<History[]>([]);
   const [hasAiAnalysis, setHasAiAnalysis] = useState(false);
   const [hasTranscript, setHasTranscript] = useState(false);
-  const [busy, setBusy] = useState<"draft" | "submit" | null>(null);
+  const [busy, setBusy] = useState<"analyze" | "draft" | "submit" | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [showSubmitNotice, setShowSubmitNotice] = useState(false);
+
+  const applyDetail = useCallback((data: ReviewDetailResponse) => {
+    const resolvedRecordings = data.recordings.map((item) => ({
+      ...item,
+      url: item.url ? `${API_BASE_URL}${item.url}` : undefined,
+    }));
+    setTask(data.task);
+    setFields(data.fields);
+    setRecordings(resolvedRecordings);
+    setActiveRecording(resolvedRecordings[0] ?? null);
+    setTranscripts(data.transcripts);
+    setHistory(data.history);
+    setHasAiAnalysis(data.hasAiAnalysis);
+    setHasTranscript(data.hasTranscript);
+  }, []);
 
   useEffect(() => () => {
     if (submitNoticeTimerRef.current) clearTimeout(submitNoticeTimerRef.current);
@@ -89,18 +104,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
       try {
         const data = await apiRequest<ReviewDetailResponse>(`/api/review-tasks/${taskId}`);
         if (!active) return;
-        const resolvedRecordings = data.recordings.map((item) => ({
-          ...item,
-          url: item.url ? `${API_BASE_URL}${item.url}` : undefined,
-        }));
-        setTask(data.task);
-        setFields(data.fields);
-        setRecordings(resolvedRecordings);
-        setActiveRecording(resolvedRecordings[0] ?? null);
-        setTranscripts(data.transcripts);
-        setHistory(data.history);
-        setHasAiAnalysis(data.hasAiAnalysis);
-        setHasTranscript(data.hasTranscript);
+        applyDetail(data);
         if (data.task.status === "analyzing") {
           timer = setTimeout(loadDetail, 3000);
         }
@@ -110,7 +114,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
     }
     loadDetail();
     return () => { active = false; if (timer) clearTimeout(timer); };
-  }, [taskId]);
+  }, [applyDetail, taskId]);
 
   const modules = useMemo(() => buildReviewModules(fields), [fields]);
   const confirmedCount = fields.filter((field) => field.confirmed).length;
@@ -152,6 +156,27 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
   function confirmMatched() {
     setFields((current) => current.map((field) => field.status === "matched" ? { ...field, confirmed: true, final: field.excel } : field));
     setMessage("一致字段已全部确认。");
+  }
+
+  async function retryAnalysis() {
+    setBusy("analyze");
+    setError("");
+    setMessage("");
+    setTask((current) => current ? { ...current, status: "analyzing" } : current);
+    try {
+      await apiRequest(`/api/review-tasks/${taskId}/analyze`, {
+        method: "POST",
+        body: JSON.stringify({ force: false }),
+      });
+      const data = await apiRequest<ReviewDetailResponse>(`/api/review-tasks/${taskId}`);
+      applyDetail(data);
+      setMessage("AI 重新分析完成。");
+    } catch (reason) {
+      setTask((current) => current ? { ...current, status: "analysis_failed" } : current);
+      setError(reason instanceof Error ? reason.message : "AI 重新分析失败");
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function saveDraft() {
@@ -237,7 +262,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
       </section>
 
       {(error || message) && <div className={`mb-5 flex justify-between rounded-xl border px-4 py-3 text-sm font-bold ${error ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}><span>{error || message}</span><button onClick={() => { setError(""); setMessage(""); }}>×</button></div>}
-      {!hasAiAnalysis && <div className={`mb-5 rounded-xl border px-4 py-4 text-sm font-bold ${task.status === "analysis_failed" ? "border-rose-200 bg-rose-50 text-rose-800" : task.status === "analyzing" ? "border-blue-200 bg-blue-50 text-blue-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>{task.status === "analysis_failed" ? "AI 分析失败，请检查 OpenAI 配置或网络后重试。" : task.status === "analyzing" ? "AI 正在后台转写录音并提取字段，本页每 3 秒自动刷新。" : "暂无 AI 分析结果。当前仅展示 Excel 填报值，请先完成录音转写与 AI 字段提取。"}</div>}
+      {!hasAiAnalysis && <div className={`mb-5 flex flex-col gap-3 rounded-xl border px-4 py-4 text-sm font-bold sm:flex-row sm:items-center sm:justify-between ${task.status === "analysis_failed" ? "border-rose-200 bg-rose-50 text-rose-800" : task.status === "analyzing" ? "border-blue-200 bg-blue-50 text-blue-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}><span>{task.status === "analysis_failed" ? "AI 分析失败，请检查 OpenAI 配置或网络后重试。" : task.status === "analyzing" ? "AI 正在后台转写录音并提取字段，请稍候。" : "暂无 AI 分析结果。当前仅展示 Excel 填报值，请先完成录音转写与 AI 字段提取。"}</span>{task.status === "analysis_failed" && <button onClick={retryAnalysis} disabled={busy !== null} className="shrink-0 rounded-lg bg-rose-700 px-4 py-2 text-xs font-black text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60">重新分析</button>}{task.status === "analyzing" && busy === "analyze" && <span className="shrink-0 text-xs">重新分析中…</span>}</div>}
       {showHistory && <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-black">审核历史</h2><div className="mt-4 space-y-3">{history.length ? history.map((item, index) => <div key={`${item.when}-${index}`} className="flex gap-3 text-sm"><span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#137161]"/><div><p><strong>{item.who}</strong> · {item.action}</p><p className="mt-0.5 text-xs text-slate-400">{item.when}</p></div></div>) : <p className="text-sm text-slate-400">暂无审核历史</p>}</div></section>}
 
       <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)] 2xl:grid-cols-[320px_minmax(0,1fr)]">
@@ -268,7 +293,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
               return <tr key={group.map((field) => field.key).join("|")} className={confirmed ? "bg-emerald-50/30" : ""}>
                 <td className="px-2 py-3 text-xs font-black">{isProduct ? `畅销产品 ${groupIndex + 1}` : shortLabel(group[0])}{isProduct && <div className="mt-2 space-y-2 text-[10px] font-medium text-slate-400">{group.map((field) => <p key={field.key}>{productPart(field)}</p>)}</div>}</td>
                 <td className="px-2 py-3 text-xs"><div className="space-y-2">{group.map((field) => <p key={field.key} className="min-h-5 break-words">{field.excel} {field.unit}</p>)}</div></td>
-                <td className="px-2 py-3 text-xs font-bold text-[#0d5b4f]">{!hasAiAnalysis ? <span className="font-medium text-slate-400">暂无 AI 分析结果</span> : <div className="space-y-2">{group.map((field) => <p key={field.key} className="min-h-5 break-words">{field.ai} {field.unit}</p>)}</div>}</td>
+                <td className="px-2 py-3 text-xs font-bold text-[#0d5b4f]">{!hasAiAnalysis ? <span className="font-medium text-slate-400">暂无 AI 分析结果</span> : <div className="space-y-2">{group.map((field) => <p key={field.key} className={`min-h-5 break-words ${field.status === "missing" ? "text-slate-500" : ""}`}>{field.status === "missing" ? "数据缺失" : <>{field.ai} {field.unit}</>}</p>)}</div>}</td>
                 <td className="px-2 py-3 text-xs font-black">{!hasAiAnalysis ? "—" : <div className="space-y-2">{group.map((field) => <p key={field.key} className="min-h-5">{Math.round(field.confidence * 100)}%</p>)}</div>}</td>
                 <td className="px-2 py-3"><span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-1 text-[10px] font-bold ${fieldStatusMeta[status].className}`}><span className={`h-1.5 w-1.5 rounded-full ${fieldStatusMeta[status].dot}`}/>{fieldStatusMeta[status].label}</span></td>
                 <td className="px-2 py-3"><div className="space-y-2">{group.map((field) => <input key={field.key} aria-label={`${field.label}人工最终值`} value={field.final} disabled={confirmed} onChange={(event) => updateField(field.key, { final: event.target.value, confirmed: false })} className="block h-8 w-full min-w-0 rounded-lg border border-slate-300 px-2 text-xs outline-none focus:border-[#137161] disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500"/>)}</div></td>

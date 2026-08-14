@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 from app.services.analysis_service import (
+    MANDARIN_TRANSCRIPTION_LANGUAGE,
     OpenAIAnalysisProvider,
     TranscriptReference,
     _ModelExtractedField,
@@ -55,7 +56,7 @@ def test_openai_transcription_adapter_requests_diarized_segments(tmp_path):
     assert calls[0]["model"] == "gpt-4o-transcribe-diarize"
     assert calls[0]["response_format"] == "diarized_json"
     assert calls[0]["chunking_strategy"] == "auto"
-    assert calls[0]["language"] == "zh"
+    assert calls[0]["language"] == MANDARIN_TRANSCRIPTION_LANGUAGE == "zh"
 
 
 def test_openai_transcription_chunks_long_audio_and_restores_timeline(
@@ -95,6 +96,10 @@ def test_openai_transcription_chunks_long_audio_and_restores_timeline(
     segments = provider_with_client(client).transcribe(audio_path)
 
     assert len(calls) == 2
+    assert all(
+        call["language"] == MANDARIN_TRANSCRIPTION_LANGUAGE
+        for call in calls
+    )
     assert [(item.start_seconds, item.end_seconds) for item in segments] == [
         (1.0, 2.0),
         (301.0, 302.0),

@@ -26,6 +26,13 @@ LAST_YEAR = "马爹利上一个自然年零售金额(万元)(2025年)"
 CURRENT_YEAR = "轩尼诗今年截止到上个月零售金额(万元)"
 PRODUCT = "畅销产品1"
 GROUP_BUYERS = "团购客户有多少个(经常拿1箱以上任何酒)"
+HENNESSY_LAST_YEAR = "轩尼诗上一个自然年零售金额(万元)(2025年)"
+REMY_LAST_YEAR = "人头马上一个自然年零售金额(万元)(2025年)"
+OCEAN_TOTAL_LAST_YEAR = "三大洋合计上一个自然年零售金额(万元)(2025年)"
+
+
+def ocean_share_field(brand):
+    return f"{brand}占三大洋上一个自然年零售金额(万元)(2025年)比例(%)"
 
 
 class FakeProvider:
@@ -56,6 +63,54 @@ class FakeProvider:
 class FailingExtractionProvider(FakeProvider):
     def extract_fields(self, _targets, _transcript):
         raise AnalysisProviderError("字段提取失败")
+
+
+class OceanSplitProvider:
+    def __init__(self, recording_id, shares=("50", "30", "20"), total="100"):
+        self.recording_id = recording_id
+        self.shares = shares
+        self.total = total
+
+    def transcribe(self, _audio_path):
+        return [
+            TranscribedSegmentData(0, 5, "门店", f"去年三大洋合计{self.total}万。"),
+            TranscribedSegmentData(5, 10, "门店", f"马爹利占{self.shares[0]}%。"),
+            TranscribedSegmentData(10, 15, "门店", f"轩尼诗占{self.shares[1]}%。"),
+            TranscribedSegmentData(15, 20, "门店", f"人头马占{self.shares[2]}%。"),
+        ]
+
+    def extract_fields(self, targets, _transcript):
+        target_names = {name for name, _unit in targets}
+        expected_intermediates = {
+            OCEAN_TOTAL_LAST_YEAR,
+            *(ocean_share_field(brand) for brand in ("马爹利", "轩尼诗", "人头马")),
+        }
+        assert expected_intermediates <= target_names
+        return [
+            ExtractedFieldData(
+                OCEAN_TOTAL_LAST_YEAR, self.total, "万元", 0.96,
+                self.recording_id, 0,
+            ),
+            *(
+                ExtractedFieldData(
+                    ocean_share_field(brand), share, "%", 0.95,
+                    self.recording_id, index,
+                )
+                for index, (brand, share) in enumerate(
+                    zip(("马爹利", "轩尼诗", "人头马"), self.shares),
+                    start=1,
+                )
+            ),
+        ]
+
+
+class IncompleteOceanSplitProvider(OceanSplitProvider):
+    def extract_fields(self, targets, transcript):
+        return [
+            item
+            for item in super().extract_fields(targets, transcript)
+            if item.field_name != ocean_share_field("人头马")
+        ]
 
 
 def create_pending_task(db_session):
@@ -184,3 +239,103 @@ def test_analysis_rejects_task_without_recording(db_session):
         assert "没有关联录音" in exc.detail
     else:
         raise AssertionError("task without recordings should not be analyzed")
+
+
+def test_analysis_splits_ocean_total_by_complete_brand_shares(db_session):
+    task, recording = create_pending_task(db_session)
+    next(item for item in task.excel_values if item.field_name == LAST_YEAR).field_value = "50"
+    task.excel_values.extend(
+        [
+            ExcelFieldValue(field_name=HENNESSY_LAST_YEAR, field_value="30"),
+            ExcelFieldValue(field_name=REMY_LAST_YEAR, field_value="20"),
+        ]
+    )
+    db_session.commit()
+
+    analyze_task(db_session, task.id, OceanSplitProvider(recording.id))
+
+    results = {
+        item.field_name: item
+        for item in db_session.scalars(
+            select(AIFieldResult).where(AIFieldResult.task_id == task.id)
+        )
+    }
+    assert results[LAST_YEAR].field_value == "50"
+    assert results[HENNESSY_LAST_YEAR].field_value == "30"
+    assert results[REMY_LAST_YEAR].field_value == "20"
+    assert all(
+        results[name].status == "matched"
+        for name in (LAST_YEAR, HENNESSY_LAST_YEAR, REMY_LAST_YEAR)
+    )
+    assert OCEAN_TOTAL_LAST_YEAR not in results
+    assert ocean_share_field("马爹利") not in results
+    assert results[LAST_YEAR].evidence_text == "去年三大洋合计100万。 马爹利占50%。"
+
+
+def test_analysis_does_not_split_when_brand_shares_do_not_total_100(db_session):
+    task, recording = create_pending_task(db_session)
+
+    analyze_task(
+        db_session,
+        task.id,
+        OceanSplitProvider(recording.id, shares=("50", "30", "10")),
+    )
+
+    results = {
+        item.field_name: item
+        for item in db_session.scalars(
+            select(AIFieldResult).where(AIFieldResult.task_id == task.id)
+        )
+    }
+    assert results[LAST_YEAR].field_value is None
+    assert results[HENNESSY_LAST_YEAR].field_value is None
+    assert results[REMY_LAST_YEAR].field_value is None
+    assert all(
+        results[name].status == "pending"
+        for name in (LAST_YEAR, HENNESSY_LAST_YEAR, REMY_LAST_YEAR)
+    )
+
+
+def test_analysis_marks_incomplete_brand_shares_pending(db_session):
+    task, recording = create_pending_task(db_session)
+
+    analyze_task(
+        db_session,
+        task.id,
+        IncompleteOceanSplitProvider(recording.id),
+    )
+
+    results = {
+        item.field_name: item
+        for item in db_session.scalars(
+            select(AIFieldResult).where(AIFieldResult.task_id == task.id)
+        )
+    }
+    assert all(
+        results[name].field_value is None
+        and results[name].status == "pending"
+        for name in (LAST_YEAR, HENNESSY_LAST_YEAR, REMY_LAST_YEAR)
+    )
+
+
+def test_analysis_rounds_split_amounts_half_up_to_two_decimals(db_session):
+    task, recording = create_pending_task(db_session)
+
+    analyze_task(
+        db_session,
+        task.id,
+        OceanSplitProvider(
+            recording.id,
+            shares=("33.335", "33.335", "33.33"),
+        ),
+    )
+
+    results = {
+        item.field_name: item
+        for item in db_session.scalars(
+            select(AIFieldResult).where(AIFieldResult.task_id == task.id)
+        )
+    }
+    assert results[LAST_YEAR].field_value == "33.34"
+    assert results[HENNESSY_LAST_YEAR].field_value == "33.34"
+    assert results[REMY_LAST_YEAR].field_value == "33.33"

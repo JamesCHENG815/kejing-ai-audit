@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Protocol
 
@@ -38,6 +41,12 @@ from app.settings import AnalysisSettings
 
 logger = logging.getLogger(__name__)
 MIN_AUDIO_CHUNK_SECONDS = 10.0
+# OpenAI's transcription API accepts ISO-639-1 language codes. Fix every
+# recording (including generated chunks) to Chinese instead of auto-detection;
+# this project's Chinese recordings are all spoken in Mandarin.
+MANDARIN_TRANSCRIPTION_LANGUAGE = "zh"
+OCEAN_SPIRIT_BRANDS = ("马爹利", "轩尼诗", "人头马")
+OCEAN_SPLIT_SCALE = Decimal("0.01")
 
 
 @dataclass(frozen=True)
@@ -220,7 +229,7 @@ class OpenAIAnalysisProvider:
                     file=audio_file,
                     response_format="diarized_json",
                     chunking_strategy="auto",
-                    language="zh",
+                    language=MANDARIN_TRANSCRIPTION_LANGUAGE,
                 )
         except Exception as exc:
             raise AnalysisProviderError(f"语音转写服务调用失败：{exc}") from exc
@@ -290,7 +299,7 @@ class OpenAIAnalysisProvider:
         ]
         system_prompt = """你是门店拜访录音的数据抽取器。只能输出录音原文明确支持的字段，禁止猜测、补全、换算未说出的值或使用 Excel 值推断。
 规则：
-1. field_name 必须逐字来自目标字段；没有明确提及的字段不要输出。
+1. field_name 必须逐字来自目标字段；没有明确提及的字段不要输出。“三大洋合计……”和“……占三大洋……比例(%)”是拆分用的中间字段，仅在录音明确说出合计或对应品牌占比时输出。
 2. recording_id 和 segment_index 必须引用给定转写中的一个片段，该片段 text 必须直接包含 value；context 只用于判断品牌、年份和问题范围，不能作为直接证据。
 3. 金额按目标 expected_unit 输出；万元字段只输出数值（例如录音说“二十万”，value 输出“20”，unit 输出“万元”）。
 4. 畅销产品按录音明确列举的单品顺序填入畅销产品1、2……；“白酒、洋酒、威士忌”等品类不是单品。进货价和瓶数只有能与该单品明确关联时才输出。
@@ -335,6 +344,139 @@ class AnalysisResult:
     pending: int
     conflict: int
     missing: int
+
+
+@dataclass(frozen=True)
+class _OceanSplitSpec:
+    brand: str
+    output_field: str
+    total_field: str
+    share_field: str
+
+
+def _ocean_split_specs(target_names: list[str]) -> list[_OceanSplitSpec]:
+    """Build non-persisted extraction targets used to derive brand amounts."""
+    pattern = re.compile(
+        r"^(马爹利|轩尼诗|人头马)"
+        r"(.*(?:上一个自然年零售金额|今年截止到上个月零售金额).*)$"
+    )
+    specs: list[_OceanSplitSpec] = []
+    for field_name in target_names:
+        match = pattern.match(field_name)
+        if not match:
+            continue
+        brand, period = match.groups()
+        specs.append(
+            _OceanSplitSpec(
+                brand=brand,
+                output_field=field_name,
+                total_field=f"三大洋合计{period}",
+                share_field=f"{brand}占三大洋{period}比例(%)",
+            )
+        )
+    return specs
+
+
+def _decimal_extraction(value: str) -> Decimal | None:
+    normalized = unicodedata.normalize("NFKC", value).strip().replace(",", "")
+    match = re.fullmatch(r"([-+]?\d+(?:\.\d+)?)\s*%?", normalized)
+    if not match:
+        return None
+    try:
+        return Decimal(match.group(1))
+    except InvalidOperation:
+        return None
+
+
+def _format_split_amount(value: Decimal) -> str:
+    rounded = value.quantize(OCEAN_SPLIT_SCALE, rounding=ROUND_HALF_UP)
+    return format(rounded, "f").rstrip("0").rstrip(".") or "0"
+
+
+def _derive_ocean_brand_amounts(
+    specs: list[_OceanSplitSpec],
+    extractions: dict[str, tuple[ExtractedFieldData, TranscriptReference]],
+) -> set[str]:
+    """Fill valid splits and return unresolved output fields needing confirmation."""
+    groups: dict[str, list[_OceanSplitSpec]] = {}
+    pending_fields: set[str] = set()
+    for spec in specs:
+        groups.setdefault(spec.total_field, []).append(spec)
+
+    for total_field, group in groups.items():
+        if {spec.brand for spec in group} != set(OCEAN_SPIRIT_BRANDS):
+            continue
+        total_extraction = extractions.get(total_field)
+        share_extractions = [extractions.get(spec.share_field) for spec in group]
+        missing_output_fields = {
+            spec.output_field
+            for spec in group
+            if spec.output_field not in extractions
+        }
+        has_split_input = total_extraction is not None or any(
+            item is not None for item in share_extractions
+        )
+        if not missing_output_fields or not has_split_input:
+            continue
+        if total_extraction is None or any(item is None for item in share_extractions):
+            pending_fields.update(missing_output_fields)
+            continue
+        total_item, total_reference = total_extraction
+        if any(
+            item is not None
+            and item[1].recording_id != total_reference.recording_id
+            for item in share_extractions
+        ):
+            # AIFieldResult can point at only one recording, so do not create a
+            # derived value whose calculation evidence cannot be represented.
+            pending_fields.update(missing_output_fields)
+            continue
+        total = _decimal_extraction(total_item.value)
+        shares: list[Decimal | None] = []
+        for share_extraction in share_extractions:
+            assert share_extraction is not None
+            shares.append(_decimal_extraction(share_extraction[0].value))
+        if (
+            total is None
+            or total < 0
+            or any(share is None or share < 0 for share in shares)
+            or sum(share for share in shares if share is not None) != Decimal("100")
+        ):
+            pending_fields.update(missing_output_fields)
+            continue
+        for spec, share, share_extraction in zip(
+            group, shares, share_extractions, strict=True
+        ):
+            if spec.output_field in extractions:
+                continue
+            assert share is not None and share_extraction is not None
+            share_item, share_reference = share_extraction
+            amount = total * share / Decimal("100")
+            calculation_reference = TranscriptReference(
+                recording_id=total_reference.recording_id,
+                segment_index=share_reference.segment_index,
+                start_seconds=min(
+                    total_reference.start_seconds, share_reference.start_seconds
+                ),
+                end_seconds=max(
+                    total_reference.end_seconds, share_reference.end_seconds
+                ),
+                speaker=share_reference.speaker,
+                text=f"{total_reference.text} {share_reference.text}",
+                context=share_reference.context,
+            )
+            extractions[spec.output_field] = (
+                ExtractedFieldData(
+                    field_name=spec.output_field,
+                    value=_format_split_amount(amount),
+                    unit="万元",
+                    confidence=min(total_item.confidence, share_item.confidence),
+                    recording_id=share_item.recording_id,
+                    segment_index=share_item.segment_index,
+                ),
+                calculation_reference,
+            )
+    return pending_fields
 
 
 def _load_analysis_task(db: Session, task_id: int) -> AuditTask:
@@ -517,12 +659,20 @@ def analyze_task(
         field_name: stored_excel_fields.get(field_name)
         for field_name in target_names
     }
+    split_specs = _ocean_split_specs(target_names)
+    intermediate_units = {
+        spec.total_field: "万元" for spec in split_specs
+    } | {
+        spec.share_field: "%" for spec in split_specs
+    }
     targets = [
         (field_name, infer_unit(field_name, item.unit if item else None))
         for field_name, item in excel_fields.items()
     ]
+    targets.extend(intermediate_units.items())
+    targets = list(dict.fromkeys(targets))
     extracted = provider.extract_fields(targets, references) if references else []
-    target_names = set(excel_fields)
+    extraction_target_names = set(excel_fields) | set(intermediate_units)
     reference_map = {
         (item.recording_id, item.segment_index): item for item in references
     }
@@ -530,7 +680,7 @@ def analyze_task(
     for item in extracted:
         reference = reference_map.get((item.recording_id, item.segment_index))
         if (
-            item.field_name not in target_names
+            item.field_name not in extraction_target_names
             or not item.value.strip()
             or reference is None
             or not 0 <= item.confidence <= 1
@@ -552,6 +702,10 @@ def analyze_task(
             )
         if current is None or validated_item.confidence > current[0].confidence:
             best_extraction[item.field_name] = (validated_item, reference)
+
+    split_pending_fields = _derive_ocean_brand_amounts(
+        split_specs, best_extraction
+    )
 
     try:
         db.execute(delete(AIFieldResult).where(AIFieldResult.task_id == task.id))
@@ -586,6 +740,8 @@ def analyze_task(
                 ai_unit=unit,
                 confidence_threshold=threshold,
             )
+            if extraction is None and field_name in split_pending_fields:
+                result_status = "pending"
             status_counts[result_status] += 1
             db.add(
                 AIFieldResult(
