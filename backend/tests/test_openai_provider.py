@@ -18,7 +18,7 @@ def provider_with_client(client):
     provider.settings = AnalysisSettings(
         openai_api_key="test-key",
         transcription_model="gpt-4o-transcribe-diarize",
-        extraction_model="gpt-4o-mini",
+        extraction_model="gpt-5.6-terra",
         confidence_threshold=0.75,
     )
     provider.client = client
@@ -73,6 +73,9 @@ def test_openai_transcription_chunks_long_audio_and_restores_timeline(
         yield [(chunk_paths[0], 0.0), (chunk_paths[1], 300.0)]
 
     monkeypatch.setattr(analysis_service, "_probe_audio_duration", lambda _path: 600)
+    monkeypatch.setattr(
+        analysis_service, "_audio_file_fits_api_limit", lambda _path: False
+    )
     monkeypatch.setattr(analysis_service, "_chunk_audio", fake_chunks)
     calls = []
 
@@ -112,6 +115,30 @@ def test_audio_chunks_merge_tiny_final_tail():
         (300.0, 300.0),
         (600.0, 301.4),
     ]
+
+
+def test_transcription_keeps_long_audio_whole_when_file_fits_api_limit(
+    tmp_path, monkeypatch
+):
+    audio_path = tmp_path / "long-but-small.m4a"
+    audio_path.write_bytes(b"audio")
+    provider = provider_with_client(SimpleNamespace())
+    expected = [
+        analysis_service.TranscribedSegmentData(0.0, 600.0, "A", "普通话录音")
+    ]
+    calls = []
+
+    def transcribe_single(path):
+        calls.append(path)
+        return expected
+
+    monkeypatch.setattr(provider, "_transcribe_single", transcribe_single)
+    monkeypatch.setattr(
+        analysis_service, "_probe_audio_duration", lambda _path: 600
+    )
+
+    assert provider.transcribe(audio_path) == expected
+    assert calls == [audio_path]
 
 
 def test_audio_chunks_keep_normal_final_chunk():
@@ -155,5 +182,5 @@ def test_openai_extraction_adapter_reads_structured_output():
 
     assert len(fields) == 1
     assert fields[0].value == "20"
-    assert calls[0]["model"] == "gpt-4o-mini"
+    assert calls[0]["model"] == "gpt-5.6-terra"
     assert calls[0]["text_format"] is _ModelExtractionResponse

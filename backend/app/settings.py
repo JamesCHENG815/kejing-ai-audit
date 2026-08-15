@@ -29,7 +29,7 @@ class AnalysisSettings:
             transcription_model=os.getenv(
                 "OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-transcribe-diarize"
             ),
-            extraction_model=os.getenv("OPENAI_EXTRACTION_MODEL", "gpt-4o-mini"),
+            extraction_model=os.getenv("OPENAI_EXTRACTION_MODEL", "gpt-5.6-terra"),
             confidence_threshold=float(
                 os.getenv("ANALYSIS_CONFIDENCE_THRESHOLD", "0.75")
             ),

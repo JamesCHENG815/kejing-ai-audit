@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL, apiRequest } from "@/lib/api";
+import { formatBeijingDateTime } from "@/lib/date-time";
 import {
   buildReviewModules,
   fieldStatusMeta,
@@ -159,6 +160,10 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
   }
 
   async function retryAnalysis() {
+    const confirmed = window.confirm(
+      "重新分析会重新转写录音、刷新 AI 字段结果，并产生 OpenAI API 费用。当前未保存的审核修改将丢失，是否继续？",
+    );
+    if (!confirmed) return;
     setBusy("analyze");
     setError("");
     setMessage("");
@@ -166,11 +171,11 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
     try {
       await apiRequest(`/api/review-tasks/${taskId}/analyze`, {
         method: "POST",
-        body: JSON.stringify({ force: false }),
+        body: JSON.stringify({ force: true }),
       });
       const data = await apiRequest<ReviewDetailResponse>(`/api/review-tasks/${taskId}`);
       applyDetail(data);
-      setMessage("AI 重新分析完成。");
+      setMessage("AI 重新分析完成，录音转写和字段结果已刷新。");
     } catch (reason) {
       setTask((current) => current ? { ...current, status: "analysis_failed" } : current);
       setError(reason instanceof Error ? reason.message : "AI 重新分析失败");
@@ -194,7 +199,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
     }
     setHistory((current) => [{
       who: "当前经理",
-      when: new Date().toLocaleString("zh-CN", { hour12: false }),
+      when: new Date().toISOString(),
       action: `保存审核草稿，已确认 ${confirmedCount}/${fields.length} 个字段`,
     }, ...current]);
     setMessage("审核草稿已保存。");
@@ -218,7 +223,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
       return;
     }
     setTask((current) => current ? { ...current, status: "completed" } : current);
-    setHistory((current) => [{ who: "当前经理", when: new Date().toLocaleString("zh-CN", { hour12: false }), action: "提交并完成审核" }, ...current]);
+    setHistory((current) => [{ who: "当前经理", when: new Date().toISOString(), action: "提交并完成审核" }, ...current]);
     setMessage("审核已提交完成。");
     setShowSubmitNotice(true);
     if (submitNoticeTimerRef.current) clearTimeout(submitNoticeTimerRef.current);
@@ -244,6 +249,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
         <div className="flex flex-wrap gap-2">
           <a href={`${API_BASE_URL}/api/review-tasks/${taskId}/export`} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold">导出当前门店</a>
           <button onClick={() => setShowHistory((value) => !value)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold">审核历史 {showHistory ? "↑" : "↓"}</button>
+          <button onClick={retryAnalysis} disabled={busy !== null || !recordings.length || task.status === "analyzing" || task.status === "reviewing" || task.status === "completed"} className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm font-bold text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50">{busy === "analyze" ? "AI 分析中…" : "↻ 重新进行 AI 分析"}</button>
           <button onClick={saveDraft} disabled={busy !== null} className="rounded-xl border border-[#0d5b4f] px-4 py-2.5 text-sm font-bold text-[#0d5b4f]">{busy === "draft" ? "保存中…" : "保存草稿"}</button>
           <button onClick={submitReview} disabled={busy !== null} className="rounded-xl bg-[#0d5b4f] px-5 py-2.5 text-sm font-black text-white">{busy === "submit" ? "提交中…" : "提交完成审核"}</button>
         </div>
@@ -263,7 +269,7 @@ export default function ReviewDetail({ taskId }: { taskId: string }) {
 
       {(error || message) && <div className={`mb-5 flex justify-between rounded-xl border px-4 py-3 text-sm font-bold ${error ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}><span>{error || message}</span><button onClick={() => { setError(""); setMessage(""); }}>×</button></div>}
       {!hasAiAnalysis && <div className={`mb-5 flex flex-col gap-3 rounded-xl border px-4 py-4 text-sm font-bold sm:flex-row sm:items-center sm:justify-between ${task.status === "analysis_failed" ? "border-rose-200 bg-rose-50 text-rose-800" : task.status === "analyzing" ? "border-blue-200 bg-blue-50 text-blue-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}><span>{task.status === "analysis_failed" ? "AI 分析失败，请检查 OpenAI 配置或网络后重试。" : task.status === "analyzing" ? "AI 正在后台转写录音并提取字段，请稍候。" : "暂无 AI 分析结果。当前仅展示 Excel 填报值，请先完成录音转写与 AI 字段提取。"}</span>{task.status === "analysis_failed" && <button onClick={retryAnalysis} disabled={busy !== null} className="shrink-0 rounded-lg bg-rose-700 px-4 py-2 text-xs font-black text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60">重新分析</button>}{task.status === "analyzing" && busy === "analyze" && <span className="shrink-0 text-xs">重新分析中…</span>}</div>}
-      {showHistory && <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-black">审核历史</h2><div className="mt-4 space-y-3">{history.length ? history.map((item, index) => <div key={`${item.when}-${index}`} className="flex gap-3 text-sm"><span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#137161]"/><div><p><strong>{item.who}</strong> · {item.action}</p><p className="mt-0.5 text-xs text-slate-400">{item.when}</p></div></div>) : <p className="text-sm text-slate-400">暂无审核历史</p>}</div></section>}
+      {showHistory && <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-black">审核历史</h2><div className="mt-4 space-y-3">{history.length ? history.map((item, index) => <div key={`${item.when}-${index}`} className="flex gap-3 text-sm"><span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#137161]"/><div><p><strong>{item.who}</strong> · {item.action}</p><p className="mt-0.5 text-xs text-slate-400">{formatBeijingDateTime(item.when)}（北京时间）</p></div></div>) : <p className="text-sm text-slate-400">暂无审核历史</p>}</div></section>}
 
       <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)] 2xl:grid-cols-[320px_minmax(0,1fr)]">
         <aside className="space-y-4 xl:sticky xl:top-4 xl:self-start">

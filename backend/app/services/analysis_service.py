@@ -41,6 +41,7 @@ from app.settings import AnalysisSettings
 
 logger = logging.getLogger(__name__)
 MIN_AUDIO_CHUNK_SECONDS = 10.0
+MAX_TRANSCRIPTION_FILE_BYTES = 25_000_000
 # OpenAI's transcription API accepts ISO-639-1 language codes. Fix every
 # recording (including generated chunks) to Chinese instead of auto-detection;
 # this project's Chinese recordings are all spoken in Mandarin.
@@ -132,6 +133,10 @@ def _probe_audio_duration(audio_path: Path) -> float | None:
         return float(completed.stdout.strip()) if completed.returncode == 0 else None
     except ValueError:
         return None
+
+
+def _audio_file_fits_api_limit(audio_path: Path) -> bool:
+    return audio_path.stat().st_size <= MAX_TRANSCRIPTION_FILE_BYTES
 
 
 @contextmanager
@@ -254,9 +259,17 @@ class OpenAIAnalysisProvider:
     def transcribe(self, audio_path: Path) -> list[TranscribedSegmentData]:
         if not audio_path.is_file():
             raise AnalysisProviderError(f"录音文件不存在：{audio_path}")
-        duration = _probe_audio_duration(audio_path)
-        if duration is None or duration <= self.settings.audio_chunk_seconds:
+        # Preserve the full Mandarin conversation context whenever the file fits
+        # OpenAI's 25 MB transcription limit. Server-side VAD already handles
+        # long recordings; splitting by duration caused avoidable context loss.
+        if _audio_file_fits_api_limit(audio_path):
             return self._transcribe_single(audio_path)
+
+        duration = _probe_audio_duration(audio_path)
+        if duration is None:
+            raise AnalysisConfigurationError(
+                "超过 25 MB 的录音分片需要 ffprobe，请安装 ffmpeg/ffprobe"
+            )
 
         segments: list[TranscribedSegmentData] = []
         with _chunk_audio(
