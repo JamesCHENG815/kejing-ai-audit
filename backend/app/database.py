@@ -47,6 +47,33 @@ def init_db() -> None:
                 "ALTER TABLE human_reviews "
                 "ADD COLUMN confirmed BOOLEAN NOT NULL DEFAULT 0"
             )
+        _backfill_review_events(connection)
+
+
+def _backfill_review_events(connection) -> None:
+    """Record pre-upgrade review rows as ``legacy`` events.
+
+    ``review_events`` was introduced after the first production data existed, so
+    those tasks would otherwise show an empty audit panel. The rows are real
+    (reviewer / value / reason / timestamp all come from ``human_reviews``); only
+    the intermediate history before the upgrade is genuinely unknown, and the
+    event type makes that explicit instead of implying it was observed.
+
+    Idempotent: a task that already has any event is skipped.
+    """
+    connection.exec_driver_sql(
+        """
+        INSERT INTO review_events
+            (task_id, event_type, field_name, value_before, value_after,
+             reason, reviewer, created_at)
+        SELECT hr.task_id, 'legacy', hr.field_name, NULL, hr.final_value,
+               hr.change_reason, hr.reviewer, hr.updated_at
+        FROM human_reviews hr
+        WHERE NOT EXISTS (
+            SELECT 1 FROM review_events ev WHERE ev.task_id = hr.task_id
+        )
+        """
+    )
 
 
 def get_db() -> Generator[Session, None, None]:

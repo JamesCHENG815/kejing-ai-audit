@@ -91,7 +91,7 @@ export default function ImportPage() {
     if (!batch) return;
     setError("");
     try {
-      await fetch(`${API_BASE_URL}/api/import-batches/${batch.id}/recordings/${id}`, { method: "DELETE" }).then(async (response) => { if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail ?? "删除失败"); });
+      await apiRequest(`/api/import-batches/${batch.id}/recordings/${id}`, { method: "DELETE" });
       await loadMatches(batch.id); setNotice("录音已删除。");
     } catch (err) { setError(errorText(err)); }
   }

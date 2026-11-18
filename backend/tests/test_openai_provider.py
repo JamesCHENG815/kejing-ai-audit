@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+from app.audio_preprocess import AudioPreprocessError
 from app.services.analysis_service import (
     MANDARIN_TRANSCRIPTION_LANGUAGE,
     OpenAIAnalysisProvider,
@@ -11,15 +12,20 @@ from app.services.analysis_service import (
 )
 from app.services import analysis_service
 from app.settings import AnalysisSettings
+from app.transcription_prompt import build_task_context, build_transcription_prompt
 
 
-def provider_with_client(client):
+def provider_with_client(client, *, normalize_audio: bool = False):
     provider = OpenAIAnalysisProvider.__new__(OpenAIAnalysisProvider)
     provider.settings = AnalysisSettings(
         openai_api_key="test-key",
         transcription_model="gpt-4o-transcribe-diarize",
         extraction_model="gpt-5.6-terra",
         confidence_threshold=0.75,
+        # Pre-processing shells out to ffmpeg. These are adapter tests, so it is
+        # off by default here; the pre-processing matrix is covered by the
+        # _prepared_audio tests below.
+        normalize_audio=normalize_audio,
     )
     provider.client = client
     return provider
@@ -57,6 +63,9 @@ def test_openai_transcription_adapter_requests_diarized_segments(tmp_path):
     assert calls[0]["response_format"] == "diarized_json"
     assert calls[0]["chunking_strategy"] == "auto"
     assert calls[0]["language"] == MANDARIN_TRANSCRIPTION_LANGUAGE == "zh"
+    # The domain prompt is always sent, otherwise the model guesses at brand
+    # names and one wrong character breaks the downstream field match.
+    assert calls[0]["prompt"] == build_transcription_prompt("")
 
 
 def test_openai_transcription_chunks_long_audio_and_restores_timeline(
@@ -128,7 +137,7 @@ def test_transcription_keeps_long_audio_whole_when_file_fits_api_limit(
     ]
     calls = []
 
-    def transcribe_single(path):
+    def transcribe_single(path, prompt=""):
         calls.append(path)
         return expected
 
@@ -184,3 +193,98 @@ def test_openai_extraction_adapter_reads_structured_output():
     assert fields[0].value == "20"
     assert calls[0]["model"] == "gpt-5.6-terra"
     assert calls[0]["text_format"] is _ModelExtractionResponse
+
+
+def test_transcription_prompt_carries_store_and_salesperson(tmp_path):
+    audio_path = tmp_path / "visit.m4a"
+    audio_path.write_bytes(b"audio")
+    captured = []
+
+    def create(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(segments=[])
+
+    client = SimpleNamespace(
+        audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create))
+    )
+    provider_with_client(client).transcribe(
+        audio_path, hotwords=build_task_context("建设路烟酒行", "张三")
+    )
+
+    prompt = captured[0]["prompt"]
+    assert "建设路烟酒行" in prompt
+    assert "张三" in prompt
+    assert prompt.startswith(build_transcription_prompt(""))
+
+
+def test_prepared_audio_uses_normalised_copy(tmp_path, monkeypatch):
+    source = tmp_path / "src.m4a"
+    source.write_bytes(b"x")
+    seen = {}
+
+    def fake_normalize(_src, dst, *, filters=""):
+        seen["filters"] = filters
+        dst.write_bytes(b"f" * 32)
+        return dst
+
+    monkeypatch.setattr(analysis_service, "normalize_audio", fake_normalize)
+    provider = provider_with_client(SimpleNamespace(), normalize_audio=True)
+
+    with provider._prepared_audio(source) as prepared:
+        assert prepared != source
+        assert prepared.suffix == ".flac"
+    assert seen["filters"] == provider.settings.audio_filters
+
+
+def test_prepared_audio_falls_back_to_original_when_ffmpeg_fails(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "src.m4a"
+    source.write_bytes(b"x")
+
+    def boom(_src, _dst, *, filters=""):
+        raise AudioPreprocessError("未找到 ffmpeg")
+
+    monkeypatch.setattr(analysis_service, "normalize_audio", boom)
+    provider = provider_with_client(SimpleNamespace(), normalize_audio=True)
+
+    with provider._prepared_audio(source) as prepared:
+        assert prepared == source
+
+
+def test_prepared_audio_compresses_when_lossless_exceeds_limit(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "src.m4a"
+    source.write_bytes(b"x")
+
+    def fake_normalize(_src, dst, *, filters=""):
+        dst.write_bytes(b"f" * 64)
+        return dst
+
+    def fake_compress(_src, dst, *, bitrate="48k"):
+        dst.write_bytes(b"c" * 16)
+        return dst
+
+    monkeypatch.setattr(analysis_service, "normalize_audio", fake_normalize)
+    monkeypatch.setattr(
+        analysis_service, "compress_for_transcription", fake_compress
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "_audio_file_fits_api_limit",
+        lambda path: path.suffix == ".m4a",
+    )
+    provider = provider_with_client(SimpleNamespace(), normalize_audio=True)
+
+    with provider._prepared_audio(source) as prepared:
+        assert prepared.suffix == ".m4a"
+
+
+def test_prepared_audio_is_skipped_when_normalisation_is_disabled(tmp_path):
+    source = tmp_path / "src.m4a"
+    source.write_bytes(b"x")
+    provider = provider_with_client(SimpleNamespace())
+
+    with provider._prepared_audio(source) as prepared:
+        assert prepared == source

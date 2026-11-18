@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.auth import require_auth
 from app.database import get_db
 from app.schemas import (
     AnalyzePendingRequest,
@@ -26,12 +27,18 @@ from app.services.analysis_service import (
     pending_task_ids,
 )
 from app.services.review_service import (
+    export_review_rows,
     list_review_tasks,
     review_task_detail,
     save_review,
 )
+from app.security import csv_safe_cell
 
-router = APIRouter(prefix="/api/review-tasks", tags=["经理审核"])
+router = APIRouter(
+    prefix="/api/review-tasks",
+    tags=["经理审核"],
+    dependencies=[Depends(require_auth)],
+)
 DbSession = Annotated[Session, Depends(get_db)]
 CSV_HEADERS = [
     "批次ID", "任务ID", "门店ID", "门店名称", "拜访人", "字段名称",
@@ -54,19 +61,33 @@ def _analyze(db: Session, task_id: int, *, force: bool):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-def _review_export_response(details, filename: str) -> StreamingResponse:
+def _review_export_response(rows, filename: str) -> StreamingResponse:
     output = io.StringIO()
     output.write("\ufeff")
     writer = csv.writer(output)
     writer.writerow(CSV_HEADERS)
-    for detail in details:
-        task = detail.task
-        for field in detail.fields:
+    for task, fields in rows:
+        for field in fields:
+            # 门店名、AI 值、人工值与修改原因都可能以 =/+/-/@ 开头，直接写入
+            # 会让 Excel 当成公式执行（CSV Injection），这里统一转义。
             writer.writerow(
                 [
-                    task.batch_id, task.id, task.customer_id, task.store, task.visitor,
-                    field.label, field.excel, field.ai, field.final, field.reason,
-                    field.status, task.status, task.updated_at,
+                    csv_safe_cell(value)
+                    for value in (
+                        task.batch_id,
+                        task.id,
+                        task.customer_id,
+                        task.store,
+                        task.visitor,
+                        field.label,
+                        field.excel,
+                        field.ai,
+                        field.final,
+                        field.reason,
+                        field.status,
+                        task.status,
+                        task.updated_at,
+                    )
                 ]
             )
     response = StreamingResponse(
@@ -97,17 +118,14 @@ def get_review_tasks(db: DbSession):
 
 @router.get("/export")
 def export_review_tasks(db: DbSession):
-    details = [
-        review_task_detail(db, int(task.id)) for task in list_review_tasks(db)
-    ]
-    return _review_export_response(details, "全部门店审核结果.csv")
+    return _review_export_response(export_review_rows(db), "全部门店审核结果.csv")
 
 
 @router.get("/{task_id}/export")
 def export_review_task(task_id: int, db: DbSession):
     detail = review_task_detail(db, task_id)
     return _review_export_response(
-        [detail], f"{detail.task.store}_审核结果.csv"
+        [(detail.task, detail.fields)], f"{detail.task.store}_审核结果.csv"
     )
 
 

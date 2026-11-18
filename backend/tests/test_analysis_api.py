@@ -9,7 +9,7 @@ from tests.test_analysis_service import LAST_YEAR, create_pending_task
 
 
 class ApiFakeProvider:
-    def transcribe(self, _path):
+    def transcribe(self, _path, hotwords=""):
         return [TranscribedSegmentData(1, 3, "门店", "去年马爹利二十万。")]
 
     def extract_fields(self, _targets, _transcript):

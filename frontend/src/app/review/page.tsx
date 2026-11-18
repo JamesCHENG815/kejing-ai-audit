@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import AppShell from "@/components/app-shell";
-import { API_BASE_URL, apiRequest } from "@/lib/api";
+import { apiRequest, downloadFile } from "@/lib/api";
 import { formatBeijingDateTime } from "@/lib/date-time";
 import { fieldStatusMeta, ReviewTask, taskStatusMeta, TaskStatus } from "@/lib/review-data";
 
@@ -39,6 +39,15 @@ export default function ReviewPage() {
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, []);
 
+  async function exportAll() {
+    setError("");
+    try {
+      await downloadFile("/api/review-tasks/export", "全部门店审核结果.csv");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "导出失败");
+    }
+  }
+
   const batches = useMemo(() => [...new Set(tasks.map((task) => task.batchId))], [tasks]);
   const importSequence = useMemo(() => new Map(
     [...tasks]
@@ -56,7 +65,7 @@ export default function ReviewPage() {
   const totals = useMemo(() => tasks.reduce((sum, task) => ({ matched: sum.matched + task.stats.matched, pending: sum.pending + task.stats.pending, conflict: sum.conflict + task.stats.conflict, missing: sum.missing + task.stats.missing }), { matched: 0, pending: 0, conflict: 0, missing: 0 }), [tasks]);
 
   return <AppShell active="review"><main className="mx-auto max-w-[1400px] px-5 py-8 sm:px-8">
-    <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between"><div><p className="text-xs font-black tracking-[0.2em] text-[#137161]">REVIEW COMMAND CENTER</p><h1 className="mt-2 text-3xl font-black tracking-tight sm:text-4xl">经理审核工作台</h1><p className="mt-2 text-slate-500">按批次发现风险、处理冲突，并沉淀最终可信数据。</p></div><a href={`${API_BASE_URL}/api/review-tasks/export`} className="rounded-xl bg-[#0d5b4f] px-5 py-3 text-center text-sm font-black text-white hover:bg-[#137161]">↓ 导出审核结果</a></div>
+    <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between"><div><p className="text-xs font-black tracking-[0.2em] text-[#137161]">REVIEW COMMAND CENTER</p><h1 className="mt-2 text-3xl font-black tracking-tight sm:text-4xl">经理审核工作台</h1><p className="mt-2 text-slate-500">按批次发现风险、处理冲突，并沉淀最终可信数据。</p></div><button onClick={exportAll} className="rounded-xl bg-[#0d5b4f] px-5 py-3 text-center text-sm font-black text-white hover:bg-[#137161]">↓ 导出审核结果</button></div>
 
     {error && <div role="alert" className="mt-5 flex justify-between rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700"><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
 

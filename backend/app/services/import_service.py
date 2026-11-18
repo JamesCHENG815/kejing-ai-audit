@@ -1,5 +1,4 @@
 import re
-import shutil
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -18,6 +17,14 @@ from app.models import (
     Recording,
     TaskRecording,
 )
+from app.security import (
+    MAX_AUDIO_UPLOAD_BYTES,
+    MAX_EXCEL_UPLOAD_BYTES,
+    human_size,
+)
+
+
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 IMPORTS_DIR = BACKEND_DIR / "storage" / "imports"
@@ -31,11 +38,36 @@ def safe_filename(filename: str | None, fallback: str) -> str:
     return name or fallback
 
 
-def save_upload(upload: UploadFile, destination: Path) -> None:
+def save_upload(upload: UploadFile, destination: Path, *, max_bytes: int) -> int:
+    """把上传内容分块落盘，并在超过上限时中止。
+
+    前端虽然有 50MB / 100MB 的限制，但那只挡得住"正常使用浏览器的人"，
+    后端必须自己守住磁盘，否则一个构造请求就能把存储写满。
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     upload.file.seek(0)
-    with destination.open("wb") as target:
-        shutil.copyfileobj(upload.file, target)
+    written = 0
+    try:
+        with destination.open("wb") as target:
+            while True:
+                chunk = upload.file.read(_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=(
+                            f"文件超过 {human_size(max_bytes)} 上限："
+                            f"{safe_filename(upload.filename, '未命名文件')}"
+                        ),
+                    )
+                target.write(chunk)
+    except BaseException:
+        # 半截文件不能留在 storage 里，否则下次同名学生 409，且占用空间。
+        destination.unlink(missing_ok=True)
+        raise
+    return written
 
 
 def _cell_text(value: Any) -> str | None:
@@ -118,7 +150,7 @@ def create_import_batch(db: Session, upload: UploadFile) -> ImportBatch:
     destination = IMPORTS_DIR / str(batch.id) / filename
 
     try:
-        save_upload(upload, destination)
+        save_upload(upload, destination, max_bytes=MAX_EXCEL_UPLOAD_BYTES)
         with destination.open("rb") as source:
             visits = parse_visit_excel(source)
 
@@ -195,7 +227,7 @@ def upload_recordings(
             destination = RECORDINGS_DIR / str(batch.id) / filename
             if destination.exists():
                 raise HTTPException(status_code=409, detail=f"录音已存在：{filename}")
-            save_upload(upload, destination)
+            save_upload(upload, destination, max_bytes=MAX_AUDIO_UPLOAD_BYTES)
             created_paths.append(destination)
             recording = Recording(
                 import_batch=batch,

@@ -5,6 +5,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     String,
     Text,
     UniqueConstraint,
@@ -64,6 +65,9 @@ class AuditTask(TimestampMixin, Base):
     )
     human_reviews: Mapped[list["HumanReview"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
+    )
+    review_events: Mapped[list["ReviewEvent"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan", order_by="ReviewEvent.id"
     )
 
 
@@ -175,3 +179,38 @@ class HumanReview(TimestampMixin, Base):
     confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     task: Mapped["AuditTask"] = relationship(back_populates="human_reviews")
+
+
+class ReviewEvent(Base):
+    """Append-only audit trail for manager edits.
+
+    ``HumanReview`` only keeps the current value per field, so a second edit
+    silently overwrites the first one. This table records every transition
+    ("who changed A to B at what time, and why") and is never updated in place.
+
+    Deliberately narrow: only value changes, reason-only changes, and the
+    save/submit actions are recorded. Per-field confirm/unconfirm toggles are
+    not logged, because ``HumanReview.confirmed`` already stores the last
+    transition and logging each toggle would bury the real edits in noise.
+    """
+
+    __tablename__ = "review_events"
+    # Ordering is by primary key, not created_at: SQLite's CURRENT_TIMESTAMP has
+    # one-second resolution, so events written in the same save would tie.
+    __table_args__ = (Index("ix_review_events_task_id_id", "task_id", "id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("audit_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    field_name: Mapped[str | None] = mapped_column(String(100))
+    value_before: Mapped[str | None] = mapped_column(Text)
+    value_after: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    reviewer: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    task: Mapped["AuditTask"] = relationship(back_populates="review_events")

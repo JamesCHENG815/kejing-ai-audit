@@ -39,7 +39,7 @@ class FakeProvider:
     transcribe_calls = 0
     extract_calls = 0
 
-    def transcribe(self, _audio_path):
+    def transcribe(self, _audio_path, hotwords=""):
         self.transcribe_calls += 1
         return [
             TranscribedSegmentData(0, 5, "业务员", "去年马爹利卖了多少？"),
@@ -71,7 +71,7 @@ class OceanSplitProvider:
         self.shares = shares
         self.total = total
 
-    def transcribe(self, _audio_path):
+    def transcribe(self, _audio_path, hotwords=""):
         return [
             TranscribedSegmentData(0, 5, "门店", f"去年三大洋合计{self.total}万。"),
             TranscribedSegmentData(5, 10, "门店", f"马爹利占{self.shares[0]}%。"),

@@ -18,6 +18,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.audio_preprocess import (
+    AudioPreprocessError,
+    compress_for_transcription,
+    normalize_audio,
+)
 from app.database import BACKEND_DIR, SessionLocal
 from app.field_rules import (
     EvidenceValue,
@@ -37,6 +42,8 @@ from app.models import (
     TranscriptSegment,
 )
 from app.settings import AnalysisSettings
+from app.transcript_quality import filter_hallucinated_segments
+from app.transcription_prompt import build_task_context, build_transcription_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +87,9 @@ class ExtractedFieldData:
 
 
 class AnalysisProvider(Protocol):
-    def transcribe(self, audio_path: Path) -> list[TranscribedSegmentData]: ...
+    def transcribe(
+        self, audio_path: Path, hotwords: str = ""
+    ) -> list[TranscribedSegmentData]: ...
 
     def extract_fields(
         self,
@@ -149,28 +158,30 @@ def _chunk_audio(audio_path: Path, duration: float, chunk_seconds: int):
     with tempfile.TemporaryDirectory(prefix="kejing-audio-") as directory:
         chunks: list[tuple[Path, float]] = []
         for offset, chunk_duration in _audio_chunk_ranges(duration, chunk_seconds):
-            output_path = Path(directory) / f"chunk-{len(chunks):04d}.m4a"
+            output_path = Path(directory) / f"chunk-{len(chunks):04d}.flac"
             completed = subprocess.run(
                 [
                     ffmpeg,
                     "-hide_banner",
                     "-loglevel",
                     "error",
+                    "-nostdin",
                     "-ss",
                     str(offset),
                     "-t",
                     str(chunk_duration),
                     "-i",
                     str(audio_path),
-                    "-vn",
+                    "-map",
+                    "0:a:0",
                     "-ac",
                     "1",
                     "-ar",
                     "16000",
+                    # Lossless: the input is already 16 kHz mono, so a second
+                    # lossy encode would only degrade the audio for no gain.
                     "-c:a",
-                    "aac",
-                    "-b:a",
-                    "64k",
+                    "flac",
                     str(output_path),
                 ],
                 capture_output=True,
@@ -226,15 +237,25 @@ class OpenAIAnalysisProvider:
             max_retries=self.settings.max_retries,
         )
 
-    def _transcribe_single(self, audio_path: Path) -> list[TranscribedSegmentData]:
+    def _transcribe_single(
+        self, audio_path: Path, prompt: str = ""
+    ) -> list[TranscribedSegmentData]:
+        request: dict[str, object] = {
+            "model": self.settings.transcription_model,
+            "response_format": "diarized_json",
+            "chunking_strategy": "auto",
+            "language": MANDARIN_TRANSCRIPTION_LANGUAGE,
+        }
+        # The prompt carries the domain vocabulary (brands, products, trade
+        # jargon) plus the store and salesperson names for this visit. Without
+        # it the model guesses at proper nouns, and one wrong character breaks
+        # the downstream field match.
+        if prompt.strip():
+            request["prompt"] = prompt.strip()
         try:
             with audio_path.open("rb") as audio_file:
                 transcript = self.client.audio.transcriptions.create(
-                    model=self.settings.transcription_model,
-                    file=audio_file,
-                    response_format="diarized_json",
-                    chunking_strategy="auto",
-                    language=MANDARIN_TRANSCRIPTION_LANGUAGE,
+                    file=audio_file, **request
                 )
         except Exception as exc:
             raise AnalysisProviderError(f"语音转写服务调用失败：{exc}") from exc
@@ -256,35 +277,85 @@ class OpenAIAnalysisProvider:
             )
         return segments
 
-    def transcribe(self, audio_path: Path) -> list[TranscribedSegmentData]:
+    @contextmanager
+    def _prepared_audio(self, audio_path: Path):
+        """Yield a normalised 16 kHz mono copy, or the original on any failure.
+
+        Pre-processing must never make a recording untranscribable, so every
+        failure path falls back to the untouched file, which is exactly the
+        previous behaviour.
+        """
+        if not self.settings.normalize_audio:
+            yield audio_path
+            return
+
+        with tempfile.TemporaryDirectory(prefix="kejing-prep-") as directory:
+            work = Path(directory)
+            try:
+                ready = normalize_audio(
+                    audio_path,
+                    work / "audio.flac",
+                    filters=self.settings.audio_filters,
+                )
+            except (AudioPreprocessError, OSError) as exc:
+                logger.warning(
+                    "录音预处理失败，改用原始文件 %s：%s", audio_path, exc
+                )
+                yield audio_path
+                return
+
+            # 16 kHz mono FLAC costs about 1 MB per minute, so only very long
+            # recordings pass the upload limit. Re-encode lossily in that case
+            # rather than throwing audio away.
+            if not _audio_file_fits_api_limit(ready):
+                try:
+                    compressed = compress_for_transcription(
+                        ready, work / "audio.m4a"
+                    )
+                except (AudioPreprocessError, OSError) as exc:
+                    logger.warning(
+                        "录音压缩失败，继续使用无损文件 %s：%s", audio_path, exc
+                    )
+                else:
+                    if _audio_file_fits_api_limit(compressed):
+                        ready = compressed
+            yield ready
+
+    def transcribe(
+        self, audio_path: Path, hotwords: str = ""
+    ) -> list[TranscribedSegmentData]:
         if not audio_path.is_file():
             raise AnalysisProviderError(f"录音文件不存在：{audio_path}")
-        # Preserve the full Mandarin conversation context whenever the file fits
-        # OpenAI's 25 MB transcription limit. Server-side VAD already handles
-        # long recordings; splitting by duration caused avoidable context loss.
-        if _audio_file_fits_api_limit(audio_path):
-            return self._transcribe_single(audio_path)
 
-        duration = _probe_audio_duration(audio_path)
-        if duration is None:
-            raise AnalysisConfigurationError(
-                "超过 25 MB 的录音分片需要 ffprobe，请安装 ffmpeg/ffprobe"
-            )
+        prompt = build_transcription_prompt(hotwords)
+        with self._prepared_audio(audio_path) as prepared:
+            # Preserve the full Mandarin conversation context whenever the file
+            # fits OpenAI's 25 MB transcription limit. Server-side VAD already
+            # handles long recordings; splitting by duration caused avoidable
+            # context loss.
+            if _audio_file_fits_api_limit(prepared):
+                return self._transcribe_single(prepared, prompt)
 
-        segments: list[TranscribedSegmentData] = []
-        with _chunk_audio(
-            audio_path, duration, self.settings.audio_chunk_seconds
-        ) as chunks:
-            for chunk_path, offset in chunks:
-                for item in self._transcribe_single(chunk_path):
-                    segments.append(
-                        TranscribedSegmentData(
-                            start_seconds=item.start_seconds + offset,
-                            end_seconds=item.end_seconds + offset,
-                            speaker=item.speaker,
-                            text=item.text,
+            duration = _probe_audio_duration(prepared)
+            if duration is None:
+                raise AnalysisConfigurationError(
+                    "超过 25 MB 的录音分片需要 ffprobe，请安装 ffmpeg/ffprobe"
+                )
+
+            segments: list[TranscribedSegmentData] = []
+            with _chunk_audio(
+                prepared, duration, self.settings.audio_chunk_seconds
+            ) as chunks:
+                for chunk_path, offset in chunks:
+                    for item in self._transcribe_single(chunk_path, prompt):
+                        segments.append(
+                            TranscribedSegmentData(
+                                start_seconds=item.start_seconds + offset,
+                                end_seconds=item.end_seconds + offset,
+                                speaker=item.speaker,
+                                text=item.text,
+                            )
                         )
-                    )
         return segments
 
     def extract_fields(
@@ -539,7 +610,9 @@ def _valid_transcription(
                     text=text,
                 )
             )
-    return valid
+    # The transcription model invents text over silence and background music.
+    # Those lines would otherwise become "verbatim evidence" for a field value.
+    return filter_hallucinated_segments(valid)
 
 
 def _add_transcript_context(
@@ -639,7 +712,11 @@ def analyze_task(
             ]
         else:
             segment_data = _valid_transcription(
-                provider.transcribe(_recording_path(recording)), recording
+                provider.transcribe(
+                    _recording_path(recording),
+                    hotwords=build_task_context(task.store, task.visitor),
+                ),
+                recording,
             )
             generated_segments[recording.id] = segment_data
         references.extend(

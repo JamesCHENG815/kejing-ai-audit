@@ -18,6 +18,7 @@ from app.models import (
     AuditTask,
     ExcelFieldValue,
     HumanReview,
+    ReviewEvent,
     TaskRecording,
 )
 from app.schemas import (
@@ -41,9 +42,20 @@ REVIEWABLE_TASK_STATUSES = {
     "completed",
 }
 
+# review_events.event_type — the audit trail vocabulary.
+EVENT_FIELD_CHANGE = "field_change"
+EVENT_FIELD_REASON = "field_reason"
+EVENT_SAVE = "save"
+EVENT_SUBMIT = "submit"
+EVENT_LEGACY = "legacy"
+
 
 def _text(value: str | None) -> str:
     return value if value not in (None, "") else "—"
+
+
+def _changed(before: str | None, after: str | None) -> bool:
+    return (before or "").strip() != (after or "").strip()
 
 
 def _field_status(
@@ -156,8 +168,12 @@ def _field_rows(task: AuditTask) -> list[ReviewFieldResponse]:
     return rows
 
 
-def _task_response(task: AuditTask) -> ReviewTaskResponse:
-    counts = Counter(field.status for field in _field_rows(task))
+def _task_response(
+    task: AuditTask, rows: list[ReviewFieldResponse] | None = None
+) -> ReviewTaskResponse:
+    counts = Counter(
+        field.status for field in (_field_rows(task) if rows is None else rows)
+    )
     excel_values = {item.field_name: item.field_value for item in task.excel_values}
     address = excel_values.get("地址") or excel_values.get("POI_ADDRESS") or "—"
     visit_date = excel_values.get("拜访时间") or excel_values.get("拜访日期") or "—"
@@ -182,6 +198,23 @@ def list_review_tasks(db: Session) -> list[ReviewTaskResponse]:
     return [_task_response(task) for task in _load_tasks(db)]
 
 
+def export_review_rows(
+    db: Session,
+) -> list[tuple[ReviewTaskResponse, list[ReviewFieldResponse]]]:
+    """All tasks with their field rows, in one fixed set of queries.
+
+    ``review_task_detail`` is the obvious thing to reuse here, but it re-queries
+    the task and selectinloads every transcript segment for each task, whereas
+    the CSV only needs the 13 cheap columns. Going through it made the export a
+    textbook N+1: query count grew with the number of tasks.
+    """
+    rows: list[tuple[ReviewTaskResponse, list[ReviewFieldResponse]]] = []
+    for task in _load_tasks(db):
+        fields = _field_rows(task)
+        rows.append((_task_response(task, fields), fields))
+    return rows
+
+
 def load_review_task(db: Session, task_id: int) -> AuditTask:
     from app.models import Recording
 
@@ -192,6 +225,7 @@ def load_review_task(db: Session, task_id: int) -> AuditTask:
             selectinload(AuditTask.excel_values),
             selectinload(AuditTask.ai_results),
             selectinload(AuditTask.human_reviews),
+            selectinload(AuditTask.review_events),
             selectinload(AuditTask.task_recordings)
             .selectinload(TaskRecording.recording)
             .selectinload(Recording.transcript_segments),
@@ -201,6 +235,59 @@ def load_review_task(db: Session, task_id: int) -> AuditTask:
     if task is None or task.status not in REVIEWABLE_TASK_STATUSES:
         raise HTTPException(status_code=404, detail="审核任务不存在")
     return task
+
+
+def _event_history(event: ReviewEvent) -> ReviewHistoryResponse:
+    when = _datetime_text(event.created_at)
+    who = event.reviewer or "当前经理"
+    if event.event_type == EVENT_SUBMIT:
+        return ReviewHistoryResponse(
+            who=who,
+            when=when,
+            action=f"提交并完成审核（字段确认 {event.value_after or '—'}）",
+            kind="submit",
+        )
+    if event.event_type == EVENT_SAVE:
+        return ReviewHistoryResponse(
+            who=who,
+            when=when,
+            action=f"保存审核草稿（字段确认 {event.value_after or '—'}）",
+            kind="save",
+        )
+    if event.event_type == EVENT_LEGACY:
+        return ReviewHistoryResponse(
+            who=who,
+            when=when,
+            action=f"升级前保存的审核记录：「{event.field_name}」最终值 {_text(event.value_after)}",
+            kind="legacy",
+            field=event.field_name,
+            after=event.value_after,
+            reason=event.reason,
+        )
+    if event.event_type == EVENT_FIELD_REASON:
+        return ReviewHistoryResponse(
+            who=who,
+            when=when,
+            action=f"更新「{event.field_name}」的修改原因",
+            kind="reason",
+            field=event.field_name,
+            before=event.value_before,
+            after=event.value_after,
+            reason=event.reason,
+        )
+    return ReviewHistoryResponse(
+        who=who,
+        when=when,
+        action=(
+            f"修改「{event.field_name}」：{_text(event.value_before)}"
+            f" → {_text(event.value_after)}"
+        ),
+        kind="change",
+        field=event.field_name,
+        before=event.value_before,
+        after=event.value_after,
+        reason=event.reason,
+    )
 
 
 def review_task_detail(db: Session, task_id: int) -> ReviewTaskDetailResponse:
@@ -230,31 +317,33 @@ def review_task_detail(db: Session, task_id: int) -> ReviewTaskDetailResponse:
         for recording in recordings
         for segment in sorted(recording.transcript_segments, key=lambda item: item.start_seconds)
     ]
-    history = []
+    # Newest first. Ordering is by id because SQLite timestamps only have
+    # one-second resolution and events written by the same save would tie.
+    history = [
+        _event_history(event)
+        for event in sorted(task.review_events, key=lambda item: item.id, reverse=True)
+    ]
     if task.ai_results:
         latest_ai = max(item.updated_at for item in task.ai_results)
         history.append(
             ReviewHistoryResponse(
-                who="AI 系统", when=_datetime_text(latest_ai), action="完成录音字段提取与风险比对"
+                who="AI 系统",
+                when=_datetime_text(latest_ai),
+                action="完成录音字段提取与风险比对",
+                kind="ai",
             )
         )
-    for review in sorted(task.human_reviews, key=lambda item: item.updated_at, reverse=True):
-        history.append(
-            ReviewHistoryResponse(
-                who=review.reviewer or "当前经理",
-                when=_datetime_text(review.updated_at),
-                action=f"{'确认' if review.confirmed else '保存'}字段：{review.field_name}",
-            )
-        )
+    fields = _field_rows(task)
     return ReviewTaskDetailResponse(
-        task=_task_response(task),
-        fields=_field_rows(task),
+        task=_task_response(task, fields),
+        fields=fields,
         recordings=[
             ReviewRecordingResponse(
                 id=str(recording.id),
                 name=recording.original_filename,
                 duration=recording.duration_seconds or 0,
-                url=f"/{recording.file_path}",
+                # 不再直接暴露 storage 下的文件路径，改由带鉴权的接口按 ID 提供。
+                url=f"/api/recordings/{recording.id}/stream",
             )
             for recording in recordings
         ],
@@ -277,19 +366,54 @@ def save_review(
     if submit and submitted_fields.keys() != actual_fields.keys():
         raise HTTPException(status_code=422, detail="提交审核时必须包含全部字段")
 
+    reviewer = payload.reviewer.strip() or "当前经理"
     existing = {item.field_name: item for item in task.human_reviews}
     for key, field in submitted_fields.items():
         original = actual_fields[key]
         if field.confirmed and field.final != original.excel and not field.reason.strip():
             raise HTTPException(status_code=422, detail=f"“{original.label}”修改了原值，请填写修改原因")
+        new_final = None if field.final == "—" else field.final
+        new_reason = field.reason.strip() or None
         review = existing.get(key)
         if review is None:
+            # Nothing is stored yet, so "before" is whatever the screen showed.
+            previous_value = None if original.final == "—" else original.final
+            previous_reason = None
             review = HumanReview(task=task, field_name=key)
             db.add(review)
-        review.final_value = None if field.final == "—" else field.final
+        else:
+            previous_value = review.final_value
+            previous_reason = review.change_reason
+
+        if _changed(previous_value, new_final):
+            db.add(
+                ReviewEvent(
+                    task=task,
+                    event_type=EVENT_FIELD_CHANGE,
+                    field_name=key,
+                    value_before=previous_value,
+                    value_after=new_final,
+                    reason=new_reason,
+                    reviewer=reviewer,
+                )
+            )
+        elif _changed(previous_reason, new_reason):
+            db.add(
+                ReviewEvent(
+                    task=task,
+                    event_type=EVENT_FIELD_REASON,
+                    field_name=key,
+                    value_before=previous_value,
+                    value_after=new_final,
+                    reason=new_reason,
+                    reviewer=reviewer,
+                )
+            )
+
+        review.final_value = new_final
         review.unit = original.unit
-        review.change_reason = field.reason.strip() or None
-        review.reviewer = payload.reviewer.strip() or "当前经理"
+        review.change_reason = new_reason
+        review.reviewer = reviewer
         review.confirmed = field.confirmed
 
     confirmed_count = sum(field.confirmed for field in payload.fields)
@@ -299,6 +423,17 @@ def save_review(
         task.status = "completed"
     elif task.status != "completed":
         task.status = "reviewing"
+
+    # Always recorded, even when no field value moved: "someone opened this and
+    # pressed save" is itself part of the trail.
+    db.add(
+        ReviewEvent(
+            task=task,
+            event_type=EVENT_SUBMIT if submit else EVENT_SAVE,
+            value_after=f"{confirmed_count}/{len(actual_fields)}",
+            reviewer=reviewer,
+        )
+    )
     db.commit()
     db.refresh(task)
     return task, confirmed_count, len(actual_fields)

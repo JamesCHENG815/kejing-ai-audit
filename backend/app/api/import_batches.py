@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
+from app.auth import require_auth
 from app.database import get_db
 from app.schemas import (
     BatchCreatedResponse,
@@ -24,7 +25,11 @@ from app.services.import_service import (
 from app.services.analysis_service import analyze_submitted_batch
 
 
-router = APIRouter(prefix="/api/import-batches", tags=["文件导入"])
+router = APIRouter(
+    prefix="/api/import-batches",
+    tags=["文件导入"],
+    dependencies=[Depends(require_auth)],
+)
 DbSession = Annotated[Session, Depends(get_db)]
 
 

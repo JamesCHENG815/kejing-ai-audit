@@ -116,6 +116,11 @@ class ReviewHistoryResponse(BaseModel):
     who: str
     when: str
     action: str
+    kind: str = "event"
+    field: str | None = None
+    before: str | None = None
+    after: str | None = None
+    reason: str | None = None
 
 
 class ReviewTaskDetailResponse(BaseModel):
